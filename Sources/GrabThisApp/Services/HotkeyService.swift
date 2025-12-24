@@ -60,26 +60,38 @@ final class HotkeyService {
         Log.hotkey.info("hotkey monitors starting")
 
         flagsMonitorGlobal = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged]) { [weak self] event in
-            self?.handleFlagsChanged(event)
+            Task { @MainActor [weak self] in
+                self?.handleFlagsChanged(event)
+            }
         }
         flagsMonitorLocal = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged]) { [weak self] event in
-            self?.handleFlagsChanged(event)
+            Task { @MainActor [weak self] in
+                self?.handleFlagsChanged(event)
+            }
             return event
         }
 
         keyDownMonitorGlobal = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
-            self?.handleKeyDown(event)
+            Task { @MainActor [weak self] in
+                self?.handleKeyDown(event)
+            }
         }
         keyUpMonitorGlobal = NSEvent.addGlobalMonitorForEvents(matching: [.keyUp]) { [weak self] event in
-            self?.handleKeyUp(event)
+            Task { @MainActor [weak self] in
+                self?.handleKeyUp(event)
+            }
         }
 
         keyDownMonitorLocal = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
-            self?.handleKeyDown(event)
+            Task { @MainActor [weak self] in
+                self?.handleKeyDown(event)
+            }
             return event
         }
         keyUpMonitorLocal = NSEvent.addLocalMonitorForEvents(matching: [.keyUp]) { [weak self] event in
-            self?.handleKeyUp(event)
+            Task { @MainActor [weak self] in
+                self?.handleKeyUp(event)
+            }
             return event
         }
     }
