@@ -5,6 +5,7 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var onboardingWindowController: NSWindowController?
+    private var historyWindowController: NSWindowController?
     private let overlay = OverlayPanelController()
     private lazy var sessionController = SessionController(overlay: overlay)
     private lazy var hotkeyService = HotkeyService(appState: AppState.shared) { [weak self] state in
@@ -53,6 +54,7 @@ private extension AppDelegate {
 
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "Open Onboarding", action: #selector(openOnboarding), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "History…", action: #selector(openHistory), keyEquivalent: "h"))
         menu.addItem(NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ","))
         menu.addItem(NSMenuItem(title: "Open Screen Recording Settings", action: #selector(openScreenRecordingSettings), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Open Input Monitoring Settings", action: #selector(openInputMonitoringSettings), keyEquivalent: ""))
@@ -95,6 +97,27 @@ private extension AppDelegate {
 
         let wc = NSWindowController(window: window)
         self.onboardingWindowController = wc
+        wc.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc func openHistory() {
+        if historyWindowController != nil {
+            historyWindowController?.showWindow(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let view = HistoryView()
+        let hosting = NSHostingController(rootView: view)
+        let window = NSWindow(contentViewController: hosting)
+        window.title = "grabthis History"
+        window.setContentSize(NSSize(width: 860, height: 560))
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        window.isReleasedWhenClosed = false
+
+        let wc = NSWindowController(window: window)
+        self.historyWindowController = wc
         wc.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
     }

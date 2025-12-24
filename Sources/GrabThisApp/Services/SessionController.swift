@@ -20,9 +20,13 @@ final class SessionController: ObservableObject {
 
     private let overlay: OverlayPanelController
     private let transcription: TranscriptionService
+    private let history = SessionHistoryStore.shared
     private var transcriptionTask: Task<Void, Never>?
     private var targetPIDForInsert: pid_t?
     private var listeningStartedAt: Date?
+    private var currentSessionId: UUID?
+    private var sessionStartedAt: Date?
+    private var didSaveCurrentSession: Bool = false
 
     init(overlay: OverlayPanelController) {
         self.overlay = overlay
@@ -30,9 +34,17 @@ final class SessionController: ObservableObject {
     }
 
     func begin() {
-        guard phase == .idle else { return }
+        // If user starts a new thought while a previous session is still on-screen,
+        // archive the old one and start immediately (Wispr-like).
+        if phase != .idle {
+            archiveCurrent(endReason: .interrupted)
+            resetToIdle()
+        }
         Log.session.info("begin()")
         listeningStartedAt = Date()
+        sessionStartedAt = Date()
+        currentSessionId = UUID()
+        didSaveCurrentSession = false
 
         // Prevent the “Screen Recording” system dialog from spamming by never attempting capture
         // unless the user has granted permission in System Settings.
@@ -164,6 +176,9 @@ final class SessionController: ObservableObject {
                 }
             }
 
+            // Persist the session to History (once).
+            self.archiveCurrent(endReason: .completed)
+
             // Show review overlay after paste attempt (non-activating).
             self.overlay.presentReview(
                 appName: self.appContext?.appName ?? "Unknown",
@@ -176,6 +191,7 @@ final class SessionController: ObservableObject {
     }
 
     func cancel() {
+        archiveCurrent(endReason: .cancelled)
         transcription.reset()
         transcriptionTask?.cancel()
         transcriptionTask = nil
@@ -210,6 +226,46 @@ final class SessionController: ObservableObject {
             AutoInsertService.requestAccessibilityPermissionPrompt()
             Log.autoInsert.info("accessibility not trusted; prompted")
         }
+    }
+}
+
+private extension SessionController {
+    func archiveCurrent(endReason: SessionRecord.EndReason) {
+        guard !didSaveCurrentSession else { return }
+        guard let currentSessionId, let sessionStartedAt else { return }
+
+        // Only save sessions that have something meaningful.
+        let transcript = transcriptDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if transcript.isEmpty, screenshot == nil { return }
+
+        let endedAt = Date()
+        let screenshotPath = history.saveScreenshotIfNeeded(screenshot, sessionId: currentSessionId)
+        let record = SessionRecord(
+            id: currentSessionId,
+            startedAt: sessionStartedAt,
+            endedAt: endedAt,
+            endReason: endReason,
+            appName: appContext?.appName ?? "Unknown",
+            bundleIdentifier: appContext?.bundleIdentifier,
+            targetPID: appContext.map { Int($0.pid) },
+            transcript: transcript,
+            screenshotPath: screenshotPath
+        )
+        history.add(record)
+        didSaveCurrentSession = true
+        Log.session.info("history saved id=\(record.id.uuidString, privacy: .public) reason=\(String(describing: endReason), privacy: .public)")
+    }
+
+    func resetToIdle() {
+        transcription.reset()
+        transcriptionTask?.cancel()
+        transcriptionTask = nil
+        targetPIDForInsert = nil
+        screenshot = nil
+        transcriptDraft = ""
+        appContext = nil
+        phase = .idle
+        overlay.hide()
     }
 }
 

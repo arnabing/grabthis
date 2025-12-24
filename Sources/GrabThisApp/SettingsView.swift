@@ -9,6 +9,13 @@ struct SettingsView: View {
                 Toggle("Enable grabthis", isOn: $appState.isEnabled)
             }
 
+            Section("History") {
+                Toggle("Save screenshots to History", isOn: $appState.saveScreenshotsToHistory)
+                Text("Transcripts are saved. Screenshots are only saved if enabled.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Privacy") {
                 Text("By default, grabthis does not save screenshots or audio unless you choose Save.")
                     .font(.callout)

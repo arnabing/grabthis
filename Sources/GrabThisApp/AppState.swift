@@ -6,9 +6,13 @@ final class AppState: ObservableObject {
 
     enum Keys {
         static let onboardingCompleted = "grabthis.onboardingCompleted"
+        static let saveScreenshotsToHistory = "grabthis.saveScreenshotsToHistory"
     }
 
     @Published var isEnabled: Bool = true
+    @Published var saveScreenshotsToHistory: Bool = UserDefaults.standard.bool(forKey: Keys.saveScreenshotsToHistory) {
+        didSet { UserDefaults.standard.set(saveScreenshotsToHistory, forKey: Keys.saveScreenshotsToHistory) }
+    }
 }
 
 
