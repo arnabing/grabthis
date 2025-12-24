@@ -21,12 +21,28 @@ To match Wispr Flow’s feel (fast + invisible), our approach is:
 - Prefer **robust Cmd+V injection** (Cmd-down → V-down/up → Cmd-up with tiny delays + retries).
 - Keep clipboard correct for manual ⌘V, but (optional) **restore clipboard** after auto-insert to avoid clobbering the user’s clipboard (Wispr-like).
 
-## Execution plan (next steps)
-- Make Cursor insertion path deterministic and “invisible”:
-  - Skip activation if frontmost already matches target PID.
-  - Prefer robust Cmd+V; use typing as last resort.
-  - Add optional clipboard restore after successful insert.
-- Add logs for “key-up → insert” latency so we can tune to Wispr-fast.
+## Current Status
+
+### Notch UI (Recent Changes)
+
+We've refactored the overlay to use a **single continuous black island** (matching `boring.notch`'s design), but there are **known issues** that need fixing:
+
+1. **Positioning**: Island appears below the notch (should be at the very top)
+2. **Sizing**: Island is ~3× too wide
+3. **Text clipping**: Content gets cut off, black areas visible
+
+**Next step**: Audit `boring.notch` source code to understand their exact positioning/sizing approach, then port it to our `OverlayPanelController`.
+
+See:
+- `docs/CHANGELOG.md` - Recent changes summary
+- `docs/NOTCH_UI_STATUS.md` - Detailed status and next steps
+
+### Auto-insert (Cursor)
+
+Auto-insert is working for most apps (Notion, etc.) but can be finicky in Cursor. Current approach:
+- Skip activation if Cursor is already frontmost
+- Prefer robust Cmd+V injection (Cmd-down → V-down/up → Cmd-up)
+- Skip menu-based paste for Cursor (avoids menu bar flicker)
 
 ## Building / Running
 
