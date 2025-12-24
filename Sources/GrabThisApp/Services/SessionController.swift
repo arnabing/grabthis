@@ -116,21 +116,37 @@ final class SessionController: ObservableObject {
                 let frontmostBefore = NSWorkspace.shared.frontmostApplication
                 Log.autoInsert.info("start target=\(targetAppName, privacy: .public) pid=\(targetPID ?? -1, privacy: .public) frontmostBefore=\(frontmostBefore?.localizedName ?? "nil", privacy: .public) bundle=\(frontmostBefore?.bundleIdentifier ?? "nil", privacy: .public) overlayKey=\(self.overlay.isOverlayKeyWindow, privacy: .public)")
 
-                if let targetPID, let app = NSRunningApplication(processIdentifier: targetPID) {
+                // Wispr-like smoothness: avoid activation churn if we're already in the target app.
+                let frontmostPid = frontmostBefore?.processIdentifier
+                if let targetPID,
+                   frontmostPid != targetPID,
+                   let app = NSRunningApplication(processIdentifier: targetPID) {
                     let ok = app.activate(options: [.activateAllWindows])
                     Log.autoInsert.info("activate targetPid=\(targetPID, privacy: .public) ok=\(ok, privacy: .public) isActive=\(app.isActive, privacy: .public)")
+                } else {
+                    Log.autoInsert.info("skip activation (already frontmost)")
                 }
 
                 // Let focus settle (especially for Electron apps like Cursor).
-                let settleDeadline = Date().addingTimeInterval(0.65)
+                // If we didn't activate, this should be fast; if we activated, allow more time.
+                let settleBudget: TimeInterval = (frontmostPid == targetPID) ? 0.35 : 1.10
+                let settleDeadline = Date().addingTimeInterval(settleBudget)
                 while Date() < settleDeadline {
                     if let targetPID, NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID {
-                        break
+                        // Also wait for a focused element to exist (Cursor can be "frontmost" before editor focus is ready).
+                        if AutoInsertService.isAccessibilityTrusted() {
+                            var focusedObj: CFTypeRef?
+                            let sys = AXUIElementCreateSystemWide()
+                            let err = AXUIElementCopyAttributeValue(sys, kAXFocusedUIElementAttribute as CFString, &focusedObj)
+                            if err == .success, focusedObj != nil {
+                                break
+                            }
+                        } else {
+                            break
+                        }
                     }
                     try? await Task.sleep(nanoseconds: 45_000_000)
                 }
-
-                AutoInsertService.copyToClipboardKeeping(_text: self.transcriptDraft)
 
                 let frontmostAtPaste = NSWorkspace.shared.frontmostApplication
                 let axTrusted = AutoInsertService.isAccessibilityTrusted()
@@ -138,19 +154,11 @@ final class SessionController: ObservableObject {
                 Log.autoInsert.info("paste frontmostAtPaste=\(frontmostAtPaste?.localizedName ?? "nil", privacy: .public) pid=\(frontmostAtPaste?.processIdentifier ?? -1, privacy: .public) bundle=\(frontmostAtPaste?.bundleIdentifier ?? "nil", privacy: .public) axTrusted=\(axTrusted, privacy: .public)")
 
                 if axTrusted {
-                    // Try AX insert first (often more reliable for Cursor).
-                    let axOk = AutoInsertService.tryInsertViaAccessibility(self.transcriptDraft)
-                    Log.autoInsert.info("strategy axInsert ok=\(axOk, privacy: .public)")
-                    if !axOk {
-                        let menuOk = AutoInsertService.tryPasteViaEditMenu(targetPID: targetPID)
-                        Log.autoInsert.info("strategy menuPaste ok=\(menuOk, privacy: .public)")
-                        if !menuOk {
-                            AutoInsertService.copyAndPasteKeepingClipboard(self.transcriptDraft)
-                            Log.autoInsert.info("strategy cmdV fallback sent")
-                        }
-                    }
+                    let result = AutoInsertService.autoInsert(self.transcriptDraft, targetPID: targetPID)
+                    Log.autoInsert.info("autoInsert result success=\(result.success, privacy: .public) strategy=\(result.strategy?.rawValue ?? "nil", privacy: .public) details=\(result.details, privacy: .public)")
                 } else {
-                    // We can still copy (already done), but we cannot reliably auto-insert without Accessibility.
+                    // Copy only (so manual ⌘V works) and prompt for Accessibility.
+                    AutoInsertService.copyToClipboardKeeping(_text: self.transcriptDraft)
                     AutoInsertService.requestAccessibilityPermissionPrompt()
                     Log.autoInsert.info("axTrusted=false; copied only; prompted for Accessibility")
                 }

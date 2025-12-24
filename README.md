@@ -9,6 +9,25 @@ Push-to-talk screenshot + dictation overlay for macOS.
 - On release: copies transcript and attempts auto-insert into the active app (Cursor-friendly fallbacks)
 - Optional: Send screenshot + transcript to an LLM (WIP)
 
+## Wispr-like “smooth auto-insert” notes (Cursor)
+Cursor (Electron) can behave differently than native apps:
+- Some Accessibility “text set” APIs may report success without actually committing text in the editor.
+- Menu-based paste attempts can cause **visible menu bar flicker**.
+- The app can be “frontmost” before the editor/caret is ready to receive input.
+
+To match Wispr Flow’s feel (fast + invisible), our approach is:
+- **Avoid menu interaction** for Cursor (no Edit/Paste menu opening).
+- **Avoid activation churn**: if Cursor is already frontmost, do not re-activate it.
+- Prefer **robust Cmd+V injection** (Cmd-down → V-down/up → Cmd-up with tiny delays + retries).
+- Keep clipboard correct for manual ⌘V, but (optional) **restore clipboard** after auto-insert to avoid clobbering the user’s clipboard (Wispr-like).
+
+## Execution plan (next steps)
+- Make Cursor insertion path deterministic and “invisible”:
+  - Skip activation if frontmost already matches target PID.
+  - Prefer robust Cmd+V; use typing as last resort.
+  - Add optional clipboard restore after successful insert.
+- Add logs for “key-up → insert” latency so we can tune to Wispr-fast.
+
 ## Building / Running
 
 Use the packaged `.app` bundle (not a raw SwiftPM executable) so macOS permissions behave correctly:
