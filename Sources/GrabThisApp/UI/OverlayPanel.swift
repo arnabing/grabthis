@@ -24,6 +24,7 @@ final class OverlayPanelController {
         @Published var accessibilityTrusted: Bool = true
         @Published var audioLevel: Double = 0.0 // 0...1
         @Published var isHovering: Bool = false
+        @Published var notchGapWidth: Double = AppState.shared.notchGapWidth
 
         // Actions (wired by SessionController)
         var onSend: (() -> Void)?
@@ -38,6 +39,7 @@ final class OverlayPanelController {
     private var hostingController: NSHostingController<OverlayRootView>?
     private var autoDismissWork: DispatchWorkItem?
     private var hoverCancellable: AnyCancellable?
+    private var settingsCancellable: AnyCancellable?
 
     var isOverlayKeyWindow: Bool { panel?.isKeyWindow ?? false }
 
@@ -53,7 +55,7 @@ final class OverlayPanelController {
         model.responseText = ""
         model.audioLevel = 0.0
         cancelAutoDismiss()
-        show(size: NSSize(width: 220, height: 44))
+        show(size: NSSize(width: 560, height: 54))
     }
 
     func presentListening(appName: String, screenshot: ScreenshotCaptureResult?, transcript: String) {
@@ -62,7 +64,7 @@ final class OverlayPanelController {
         model.transcript = transcript
         model.mode = .listening
         cancelAutoDismiss()
-        show(size: NSSize(width: 420, height: 120))
+        show(size: NSSize(width: 560, height: 70))
     }
 
     func updateListening(screenshot: ScreenshotCaptureResult? = nil, transcript: String? = nil) {
@@ -133,6 +135,11 @@ private extension OverlayPanelController {
                 } else if self.model.mode == .review || self.model.mode == .response || self.model.mode == .error {
                     self.scheduleAutoDismiss(seconds: 3.0)
                 }
+            }
+
+            // Keep notch gap width in sync with Settings.
+            settingsCancellable = AppState.shared.$notchGapWidth.sink { [weak self] w in
+                self?.model.notchGapWidth = w
             }
         }
 
@@ -214,10 +221,9 @@ private struct IdleChip: View {
     @ObservedObject var model: OverlayPanelController.Model
 
     var body: some View {
-        ZStack {
-            ZStack {
-                Capsule()
-                    .fill(.ultraThinMaterial)
+        SplitNotchIsland(
+            notchGapWidth: model.notchGapWidth,
+            left: {
                 HStack(spacing: 10) {
                     Circle()
                         .fill(Color.cyan.opacity(0.9))
@@ -225,16 +231,18 @@ private struct IdleChip: View {
                     Text(model.isHovering ? "Hold fn to talk" : "grabthis")
                         .font(.callout.weight(.semibold))
                         .foregroundStyle(.primary)
-                    Spacer(minLength: 0)
                 }
-                .padding(.horizontal, 14)
+            },
+            right: {
+                // Keep right side extremely quiet in idle.
+                Image(systemName: "waveform")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
             }
-            .frame(height: 36)
-            .frame(width: model.isHovering ? 320 : 220, height: 44)
-            .scaleEffect(model.isHovering ? 1.04 : 1.0)
-        }
+        )
+        .scaleEffect(model.isHovering ? 1.03 : 1.0)
         .padding(.horizontal, 6)
-        .padding(.vertical, 4)
+        .padding(.vertical, 6)
         .onHover { isHovering in
             model.isHovering = isHovering
         }
@@ -247,68 +255,104 @@ private struct ListeningCard: View {
     @State private var pulse = false
 
     var body: some View {
+        SplitNotchIsland(
+            notchGapWidth: model.notchGapWidth,
+            isActiveGlow: true,
+            left: {
+                HStack(spacing: 12) {
+                    PillVisualizer(level: model.audioLevel)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(Color.cyan.opacity(0.95))
+                                .frame(width: 8, height: 8)
+                                .scaleEffect(pulse ? 1.6 : 1.0)
+                                .opacity(pulse ? 0.55 : 1.0)
+                                .onAppear {
+                                    withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                                        pulse = true
+                                    }
+                                }
+                            Text("Listening")
+                                .font(.callout.weight(.semibold))
+                            Text(model.appName)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Text(model.transcript.isEmpty ? "Speak…" : model.transcript)
+                            .font(.callout)
+                            .foregroundStyle(model.transcript.isEmpty ? .secondary : .primary)
+                            .lineLimit(1)
+                    }
+                }
+            },
+            right: {
+                // Keep right side minimal while FN is held: subtle mic glyph.
+                Image(systemName: "mic.fill")
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+        )
+        .padding(.horizontal, 6)
+        .padding(.vertical, 6)
+        .scaleEffect(1.02)
+        .animation(.spring(response: 0.30, dampingFraction: 0.78), value: model.audioLevel)
+    }
+}
+
+private struct SplitNotchIsland<Left: View, Right: View>: View {
+    let notchGapWidth: Double
+    var isActiveGlow: Bool = false
+    @ViewBuilder let left: () -> Left
+    @ViewBuilder let right: () -> Right
+
+    var body: some View {
+        HStack(spacing: 0) {
+            capsule(content: left)
+            Spacer().frame(width: max(90, notchGapWidth))
+            capsule(content: right)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func capsule<Content: View>(@ViewBuilder content: () -> Content) -> some View {
         ZStack {
-            // Base pill
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
+            Capsule()
                 .fill(.ultraThinMaterial)
                 .overlay(
-                    // Subtle glow outline (Apple Intelligence-esque)
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .strokeBorder(
-                            LinearGradient(
-                                colors: [
-                                    Color.cyan.opacity(0.55),
-                                    Color.blue.opacity(0.20),
-                                    Color.purple.opacity(0.20),
-                                ],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            ),
-                            lineWidth: 1.2
-                        )
-                        .blur(radius: 0.6)
+                    Capsule()
+                        .strokeBorder(Color.white.opacity(0.10), lineWidth: 1)
                 )
-                .shadow(color: Color.cyan.opacity(0.22), radius: 14, y: 0)
-                .shadow(color: Color.purple.opacity(0.12), radius: 20, y: 0)
-
-            HStack(spacing: 12) {
-                // Pill visualizer placeholder (wired later)
-                PillVisualizer(level: model.audioLevel)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 8) {
-                        Circle()
-                            .fill(Color.cyan.opacity(0.95))
-                            .frame(width: 8, height: 8)
-                            .scaleEffect(pulse ? 1.6 : 1.0)
-                            .opacity(pulse ? 0.55 : 1.0)
-                            .onAppear {
-                                withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
-                                    pulse = true
-                                }
-                            }
-                        Text("Listening")
-                            .font(.callout.weight(.semibold))
-                        Text(model.appName)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                .overlay {
+                    if isActiveGlow {
+                        Capsule()
+                            .strokeBorder(
+                                LinearGradient(
+                                    colors: [
+                                        Color.cyan.opacity(0.55),
+                                        Color.blue.opacity(0.22),
+                                        Color.purple.opacity(0.18),
+                                    ],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                ),
+                                lineWidth: 1.2
+                            )
+                            .blur(radius: 0.7)
+                            .opacity(0.95)
                     }
-
-                    Text(model.transcript.isEmpty ? "Speak…" : model.transcript)
-                        .font(.callout)
-                        .foregroundStyle(model.transcript.isEmpty ? .secondary : .primary)
-                        .lineLimit(1)
                 }
+                .shadow(color: isActiveGlow ? Color.cyan.opacity(0.18) : .clear, radius: 14, y: 0)
+                .shadow(color: isActiveGlow ? Color.purple.opacity(0.10) : .clear, radius: 18, y: 0)
+
+            HStack(spacing: 10) {
+                content()
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
         }
-        .frame(width: 520, height: 56)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .scaleEffect(1.02)
-        .animation(.spring(response: 0.30, dampingFraction: 0.78), value: model.audioLevel)
+        .frame(height: 44)
     }
 }
 
