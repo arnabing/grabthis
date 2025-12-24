@@ -22,6 +22,7 @@ final class SessionController: ObservableObject {
     private let transcription: TranscriptionService
     private var transcriptionTask: Task<Void, Never>?
     private var targetPIDForInsert: pid_t?
+    private var listeningStartedAt: Date?
 
     init(overlay: OverlayPanelController) {
         self.overlay = overlay
@@ -30,7 +31,8 @@ final class SessionController: ObservableObject {
 
     func begin() {
         guard phase == .idle else { return }
-        Log.app.info("session begin()")
+        Log.session.info("begin()")
+        listeningStartedAt = Date()
 
         // Prevent the “Screen Recording” system dialog from spamming by never attempting capture
         // unless the user has granted permission in System Settings.
@@ -68,12 +70,21 @@ final class SessionController: ObservableObject {
             }
         }
 
-        do {
-            try transcription.start()
-        } catch {
-            phase = .error(message: "Transcription failed: \(error.localizedDescription)")
-            overlay.presentError("Transcription failed")
-            Log.stt.error("transcription start threw: \(error.localizedDescription, privacy: .public)")
+        // Start transcription after the overlay is already visible; this yields back to the run loop,
+        // reducing the “fn → listening” perceived latency.
+        Task { @MainActor in
+            do {
+                try self.transcription.start()
+                FeedbackSoundService.playStart()
+                if let listeningStartedAt {
+                    let ms = Int(Date().timeIntervalSince(listeningStartedAt) * 1000.0)
+                    Log.stt.info("listening cue played latencyMs=\(ms, privacy: .public)")
+                }
+            } catch {
+                self.phase = .error(message: "Transcription failed: \(error.localizedDescription)")
+                self.overlay.presentError("Transcription failed")
+                Log.stt.error("transcription start threw: \(error.localizedDescription, privacy: .public)")
+            }
         }
 
         // Stream partial updates into overlay (real time).
@@ -88,50 +99,72 @@ final class SessionController: ObservableObject {
 
     func end() {
         guard phase == .listening else { return }
-        Log.app.info("session end()")
+        Log.session.info("end()")
         transcriptionTask?.cancel()
         transcriptionTask = nil
-        transcription.stop()
-        transcriptDraft = transcription.finalText.isEmpty ? transcription.partialText : transcription.finalText
+        Task { @MainActor in
+            await self.transcription.stopAndFinalize()
+            self.transcriptDraft = self.transcription.finalText.isEmpty ? self.transcription.partialText : self.transcription.finalText
+            self.overlay.setAccessibilityTrusted(AutoInsertService.isAccessibilityTrusted())
 
-        // Auto-insert flow:
-        // - Hide overlay so it can't steal focus
-        // - Re-activate the app the user was in at begin()
-        // - Copy transcript to clipboard (keep it there)
-        // - Cmd+V
-        if !transcriptDraft.isEmpty {
-            overlay.hide()
+            if !self.transcriptDraft.isEmpty {
+                // Ensure overlay doesn't interfere with focus/paste timing.
+                self.overlay.hide()
 
-            let targetPID = targetPIDForInsert
-            let targetAppName = appContext?.appName ?? "Unknown"
-            let frontmostBefore = NSWorkspace.shared.frontmostApplication?.localizedName ?? "Unknown"
-            Log.app.info("auto-insert start target=\(targetAppName, privacy: .public) pid=\(targetPID ?? -1, privacy: .public) frontmostBefore=\(frontmostBefore, privacy: .public) overlayKey=\(self.overlay.isOverlayKeyWindow, privacy: .public)")
+                let targetPID = self.targetPIDForInsert
+                let targetAppName = self.appContext?.appName ?? "Unknown"
+                let frontmostBefore = NSWorkspace.shared.frontmostApplication
+                Log.autoInsert.info("start target=\(targetAppName, privacy: .public) pid=\(targetPID ?? -1, privacy: .public) frontmostBefore=\(frontmostBefore?.localizedName ?? "nil", privacy: .public) bundle=\(frontmostBefore?.bundleIdentifier ?? "nil", privacy: .public) overlayKey=\(self.overlay.isOverlayKeyWindow, privacy: .public)")
 
-            if let targetPID, let app = NSRunningApplication(processIdentifier: targetPID) {
-                _ = app.activate(options: [])
-            }
+                if let targetPID, let app = NSRunningApplication(processIdentifier: targetPID) {
+                    let ok = app.activate(options: [.activateAllWindows])
+                    Log.autoInsert.info("activate targetPid=\(targetPID, privacy: .public) ok=\(ok, privacy: .public) isActive=\(app.isActive, privacy: .public)")
+                }
 
-            Task { @MainActor in
                 // Let focus settle (especially for Electron apps like Cursor).
-                try? await Task.sleep(nanoseconds: 160_000_000)
+                let settleDeadline = Date().addingTimeInterval(0.65)
+                while Date() < settleDeadline {
+                    if let targetPID, NSWorkspace.shared.frontmostApplication?.processIdentifier == targetPID {
+                        break
+                    }
+                    try? await Task.sleep(nanoseconds: 45_000_000)
+                }
 
                 AutoInsertService.copyToClipboardKeeping(_text: self.transcriptDraft)
 
-                let frontmostAtPaste = NSWorkspace.shared.frontmostApplication?.localizedName ?? "Unknown"
-                Log.app.info("auto-insert paste frontmostAtPaste=\(frontmostAtPaste, privacy: .public) axTrusted=\(AutoInsertService.isAccessibilityTrusted(), privacy: .public)")
+                let frontmostAtPaste = NSWorkspace.shared.frontmostApplication
+                let axTrusted = AutoInsertService.isAccessibilityTrusted()
+                self.overlay.setAccessibilityTrusted(axTrusted)
+                Log.autoInsert.info("paste frontmostAtPaste=\(frontmostAtPaste?.localizedName ?? "nil", privacy: .public) pid=\(frontmostAtPaste?.processIdentifier ?? -1, privacy: .public) bundle=\(frontmostAtPaste?.bundleIdentifier ?? "nil", privacy: .public) axTrusted=\(axTrusted, privacy: .public)")
 
-                if AutoInsertService.isAccessibilityTrusted() {
-                    AutoInsertService.copyAndPasteKeepingClipboard(self.transcriptDraft)
+                if axTrusted {
+                    // Try AX insert first (often more reliable for Cursor).
+                    let axOk = AutoInsertService.tryInsertViaAccessibility(self.transcriptDraft)
+                    Log.autoInsert.info("strategy axInsert ok=\(axOk, privacy: .public)")
+                    if !axOk {
+                        let menuOk = AutoInsertService.tryPasteViaEditMenu(targetPID: targetPID)
+                        Log.autoInsert.info("strategy menuPaste ok=\(menuOk, privacy: .public)")
+                        if !menuOk {
+                            AutoInsertService.copyAndPasteKeepingClipboard(self.transcriptDraft)
+                            Log.autoInsert.info("strategy cmdV fallback sent")
+                        }
+                    }
+                } else {
+                    // We can still copy (already done), but we cannot reliably auto-insert without Accessibility.
+                    AutoInsertService.requestAccessibilityPermissionPrompt()
+                    Log.autoInsert.info("axTrusted=false; copied only; prompted for Accessibility")
                 }
             }
+
+            // Show review overlay after paste attempt (non-activating).
+            self.overlay.presentReview(
+                appName: self.appContext?.appName ?? "Unknown",
+                screenshot: self.screenshot,
+                transcript: self.transcriptDraft
+            )
+            self.phase = .review
         }
 
-        overlay.presentReview(
-            appName: appContext?.appName ?? "Unknown",
-            screenshot: screenshot,
-            transcript: transcriptDraft
-        )
-        phase = .review
     }
 
     func cancel() {
@@ -164,10 +197,10 @@ final class SessionController: ObservableObject {
         guard !transcriptDraft.isEmpty else { return }
         if AutoInsertService.isAccessibilityTrusted() {
             AutoInsertService.copyAndPasteKeepingClipboard(transcriptDraft)
-            Log.app.info("manual insert transcript len=\(self.transcriptDraft.count, privacy: .public) keepClipboard=true")
+            Log.autoInsert.info("manual insert transcript len=\(self.transcriptDraft.count, privacy: .public) keepClipboard=true")
         } else {
             AutoInsertService.requestAccessibilityPermissionPrompt()
-            Log.app.info("accessibility not trusted; prompted")
+            Log.autoInsert.info("accessibility not trusted; prompted")
         }
     }
 }

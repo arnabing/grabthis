@@ -48,6 +48,7 @@ final class HotkeyService {
 
     private var fnIsDown: Bool = false
     private var fallbackIsDown: Bool = false
+    private var beginTimestamp: Date?
 
     init(appState: AppState, onStateChange: @escaping (State) -> Void) {
         self.appState = appState
@@ -56,6 +57,7 @@ final class HotkeyService {
 
     func start() {
         stop()
+        Log.hotkey.info("hotkey monitors starting")
 
         flagsMonitorGlobal = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged]) { [weak self] event in
             self?.handleFlagsChanged(event)
@@ -97,6 +99,7 @@ final class HotkeyService {
 
         fnIsDown = false
         fallbackIsDown = false
+        beginTimestamp = nil
         state = .idle
     }
 }
@@ -138,6 +141,8 @@ private extension HotkeyService {
     func beginListening(source: TriggerSource) {
         switch state {
         case .idle:
+            beginTimestamp = Date()
+            Log.hotkey.info("beginListening source=\(String(describing: source), privacy: .public)")
             state = .listening(source: source)
         case .listening, .processing:
             break
@@ -148,6 +153,12 @@ private extension HotkeyService {
         switch state {
         case .listening(let currentSource):
             guard currentSource == source else { return }
+            if let beginTimestamp {
+                let ms = Int(Date().timeIntervalSince(beginTimestamp) * 1000.0)
+                Log.hotkey.info("endListening source=\(String(describing: source), privacy: .public) heldMs=\(ms, privacy: .public)")
+            } else {
+                Log.hotkey.info("endListening source=\(String(describing: source), privacy: .public)")
+            }
             state = .processing
             // Placeholder: later we’ll kick off capture+audio+STT+LLM.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in

@@ -15,6 +15,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         Log.app.info("launched bundleId=\(Bundle.main.bundleIdentifier ?? "nil", privacy: .public) exe=\(Bundle.main.executableURL?.path ?? "nil", privacy: .public)")
         Log.app.info("versions short=\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "nil", privacy: .public) build=\(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "nil", privacy: .public)")
+        let cs = CodeSigningInfo.current()
+        Log.app.info("codesign status=\(cs.statusDescription, privacy: .public) signed=\(cs.isSigned, privacy: .public) teamId=\(cs.teamID ?? "nil", privacy: .public) signingId=\(cs.signingIdentifier ?? "nil", privacy: .public)")
+        if !cs.isSigned {
+            Log.app.error("TCC will not persist across rebuilds while app is unsigned. Run scripts/build_app_bundle.sh with a stable GRABTHIS_CODESIGN_IDENTITY.")
+        }
         setupStatusItem()
         maybeShowOnboarding()
         hotkeyService.start()

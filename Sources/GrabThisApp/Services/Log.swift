@@ -9,6 +9,8 @@ enum Log {
     static let stt = Logger(subsystem: subsystem, category: "stt")
     static let hotkey = Logger(subsystem: subsystem, category: "hotkey")
     static let overlay = Logger(subsystem: subsystem, category: "overlay")
+    static let autoInsert = Logger(subsystem: subsystem, category: "autoInsert")
+    static let session = Logger(subsystem: subsystem, category: "session")
 }
 
 

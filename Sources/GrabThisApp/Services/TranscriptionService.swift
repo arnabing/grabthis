@@ -18,6 +18,7 @@ final class TranscriptionService: ObservableObject {
     private let recognizer: SFSpeechRecognizer?
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
+    private var stopRequestedAt: Date?
 
     private let audioEngine = AVAudioEngine()
 
@@ -73,6 +74,7 @@ final class TranscriptionService: ObservableObject {
 
         state = .listening
         Log.stt.info("listening started")
+        stopRequestedAt = nil
 
         recognitionTask = recognizer?.recognitionTask(with: request) { [weak self] result, error in
             guard let self else { return }
@@ -82,35 +84,87 @@ final class TranscriptionService: ObservableObject {
                     Log.stt.debug("partial: \(self.partialText, privacy: .public)")
                     if result.isFinal {
                         self.finalText = self.partialText
-                        self.state = .stopped
-                        Log.stt.info("final: \(self.finalText, privacy: .public)")
+                        // IMPORTANT: The recognizer can emit `isFinal` while we’re still holding
+                        // push-to-talk (e.g., brief silence). Do not end the session early.
+                        if self.stopRequestedAt != nil {
+                            self.state = .stopped
+                        }
+                        Log.stt.info("final: \(self.finalText, privacy: .public) stopRequested=\(self.stopRequestedAt != nil, privacy: .public)")
                     }
                 }
                 if let error {
-                    self.state = .error(message: error.localizedDescription)
-                    Log.stt.error("recognition error: \(error.localizedDescription, privacy: .public)")
+                    // If we’re stopping and we already have text, prefer a “stopped” state to keep the
+                    // Wispr-like feel rather than surfacing an error.
+                    if self.stopRequestedAt != nil, !self.partialText.isEmpty {
+                        self.finalText = self.finalText.isEmpty ? self.partialText : self.finalText
+                        self.state = .stopped
+                        Log.stt.error("recognition error during stop (ignored due to text): \(error.localizedDescription, privacy: .public)")
+                    } else {
+                        self.state = .error(message: error.localizedDescription)
+                        Log.stt.error("recognition error: \(error.localizedDescription, privacy: .public)")
+                    }
                 }
             }
         }
     }
 
-    func stop() {
-        guard state == .listening else { return }
-        Log.stt.info("stop() called")
+    /// Stop capture while giving the recognizer a tiny grace window to emit the last word(s).
+    /// This reduces the “clips the last word” feeling in push-to-talk flows.
+    func stopAndFinalize(tailNanoseconds: UInt64 = 180_000_000, finalWaitNanoseconds: UInt64 = 650_000_000) async {
+        // The recognizer can emit a `.stopped`/`.error` state asynchronously; we still must stop the
+        // audio engine + tap to avoid leaking audio capture and to finalize text.
+        if !audioEngine.isRunning, recognitionRequest == nil, recognitionTask == nil {
+            return
+        }
+        stopRequestedAt = Date()
+        Log.stt.info("stopAndFinalize() called tailNs=\(tailNanoseconds, privacy: .public) waitNs=\(finalWaitNanoseconds, privacy: .public)")
+
+        // Keep capturing just a touch after key-up.
+        if tailNanoseconds > 0 {
+            try? await Task.sleep(nanoseconds: tailNanoseconds)
+        }
+
+        // Stop audio input and signal end of audio. Do NOT cancel recognitionTask immediately;
+        // we want a chance to receive a final result.
         audioEngine.stop()
         audioEngine.inputNode.removeTap(onBus: 0)
         recognitionRequest?.endAudio()
+
+        let deadline = Date().addingTimeInterval(Double(finalWaitNanoseconds) / 1_000_000_000.0)
+        while Date() < deadline {
+            if !finalText.isEmpty { break }
+            if case .error = state { break }
+            // Let callbacks run.
+            try? await Task.sleep(nanoseconds: 35_000_000)
+        }
+
+        // Cleanup task/request.
         recognitionTask?.cancel()
         recognitionTask = nil
         recognitionRequest = nil
-        finalText = finalText.isEmpty ? partialText : finalText
-        state = .stopped
-        Log.stt.info("stopped finalTextLen=\(self.finalText.count, privacy: .public)")
+
+        // Prefer final, otherwise keep the best partial.
+        if finalText.isEmpty {
+            finalText = partialText
+        }
+
+        // If the recognizer reported an error like "No speech detected" but we have text,
+        // treat it as a stopped session (Wispr-like).
+        if case .error(let message) = state, !finalText.isEmpty {
+            Log.stt.error("stop finalize overriding error due to captured text: \(message, privacy: .public)")
+            state = .stopped
+        } else if case .listening = state {
+            state = .stopped
+        }
+
+        Log.stt.info("finalized finalTextLen=\(self.finalText.count, privacy: .public) partialLen=\(self.partialText.count, privacy: .public)")
     }
 
     func reset() {
         if state == .listening {
-            stop()
+            Task { @MainActor in
+                await self.stopAndFinalize(tailNanoseconds: 0, finalWaitNanoseconds: 0)
+            }
         }
         partialText = ""
         finalText = ""

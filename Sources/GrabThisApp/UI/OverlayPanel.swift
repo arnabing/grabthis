@@ -19,6 +19,7 @@ final class OverlayPanelController {
         @Published var transcript: String = ""
         @Published var screenshot: ScreenshotCaptureResult?
         @Published var responseText: String = ""
+        @Published var accessibilityTrusted: Bool = true
 
         // Actions (wired by SessionController)
         var onSend: (() -> Void)?
@@ -58,6 +59,10 @@ final class OverlayPanelController {
         model.transcript = transcript
         model.mode = .review
         show(size: NSSize(width: 520, height: 260))
+    }
+
+    func setAccessibilityTrusted(_ trusted: Bool) {
+        model.accessibilityTrusted = trusted
     }
 
     func presentProcessing() {
@@ -216,6 +221,27 @@ private struct ReviewCard: View {
                 )
                 .onAppear { draft = model.transcript }
                 .onChange(of: draft) { _, newValue in model.transcript = newValue }
+
+            if !model.accessibilityTrusted {
+                HStack(spacing: 10) {
+                    Text("Auto‑insert is disabled (Accessibility permission needed). Copied to clipboard — press ⌘V.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                    Spacer(minLength: 0)
+                    Button("Enable") {
+                        SystemSettingsDeepLinks.openAccessibility()
+                        AutoInsertService.requestAccessibilityPermissionPrompt()
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .padding(10)
+                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(.white.opacity(0.10), lineWidth: 1)
+                )
+            }
 
             HStack {
                 Button("Insert") { model.onInsert?() }

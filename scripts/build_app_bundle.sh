@@ -39,31 +39,41 @@ printf "APPL????" > "$CONTENTS_DIR/PkgInfo"
 
 echo "Ad-hoc codesigning (required for some macOS privacy prompts)…"
 # IMPORTANT:
-# Re-signing with ad-hoc identity (-) on every build can cause macOS privacy permissions (TCC)
-# to behave like they're "resetting" after rebuilds because the code identity changes.
+# TCC permissions are tied to the app's designated requirement (bundle id + signing identity).
+# If the app is unsigned or re-signed with varying identities across rebuilds, macOS will
+# behave like permissions “reset”. We *require* a stable identity here for a good dev loop.
 #
-# If you want permissions to persist across frequent rebuilds, set a stable identity:
-#   export GRABTHIS_CODESIGN_IDENTITY="Apple Development: Your Name (TEAMID)"   (recommended)
-# or another consistent identity in your keychain.
+# Recommended:
+#   export GRABTHIS_CODESIGN_IDENTITY="Apple Development: Your Name (TEAMID)"
 #
-# If not set, we skip signing to avoid changing the identity every time.
-if [[ -n "${GRABTHIS_CODESIGN_IDENTITY:-}" ]]; then
-  echo "Codesigning with identity: $GRABTHIS_CODESIGN_IDENTITY"
-  codesign --force --sign "$GRABTHIS_CODESIGN_IDENTITY" --timestamp=none "$APP_DIR" >/dev/null 2>&1 || true
-else
+SIGN_ID="${GRABTHIS_CODESIGN_IDENTITY:-}"
+if [[ -z "$SIGN_ID" ]]; then
   # Try to find a stable codesign identity automatically.
   # Prefer Apple Development (local dev), fall back to Developer ID Application if present.
-  AUTO_ID="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*\"\\(Apple Development:.*\\)\".*/\\1/p' | head -n 1 || true)"
-  if [[ -z "$AUTO_ID" ]]; then
-    AUTO_ID="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*\"\\(Developer ID Application:.*\\)\".*/\\1/p' | head -n 1 || true)"
-  fi
-  if [[ -n "$AUTO_ID" ]]; then
-    echo "Auto-selected codesign identity: $AUTO_ID"
-    codesign --force --sign "$AUTO_ID" --timestamp=none "$APP_DIR" >/dev/null 2>&1 || true
-  else
-    echo "Skipping codesign (no Apple Development identity found). Set GRABTHIS_CODESIGN_IDENTITY if you want stable TCC permissions."
+  SIGN_ID="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*\"\\(Apple Development:.*\\)\".*/\\1/p' | head -n 1 || true)"
+  if [[ -z "$SIGN_ID" ]]; then
+    SIGN_ID="$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/.*\"\\(Developer ID Application:.*\\)\".*/\\1/p' | head -n 1 || true)"
   fi
 fi
+
+if [[ -z "$SIGN_ID" ]]; then
+  cat >&2 <<'EOF'
+ERROR: No stable codesigning identity found.
+
+To keep macOS permissions (TCC) stable across rebuilds, the app must be consistently signed.
+
+Fix:
+  1) Create/install an "Apple Development" certificate in Keychain (Xcode → Settings → Accounts).
+  2) Re-run this script, or set:
+       export GRABTHIS_CODESIGN_IDENTITY="Apple Development: Your Name (TEAMID)"
+EOF
+  exit 2
+fi
+
+echo "Codesigning with identity: $SIGN_ID"
+# Sign the Mach-O first, then the bundle. Avoid ad-hoc and avoid silently swallowing failures.
+codesign --force --sign "$SIGN_ID" --timestamp=none "$MACOS_DIR/GrabThisApp"
+codesign --force --sign "$SIGN_ID" --timestamp=none "$APP_DIR"
 
 echo "Done:"
 echo "  $APP_DIR"

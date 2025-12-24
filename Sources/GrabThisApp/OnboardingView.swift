@@ -4,6 +4,8 @@ import SwiftUI
 
 struct OnboardingView: View {
     @StateObject private var model = OnboardingViewModel()
+    @State private var wantsAutoInsert: Bool = true
+    @State private var didCopyDiagnostics: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -11,7 +13,9 @@ struct OnboardingView: View {
             if !model.isBundledApp {
                 notBundledWarning
             }
+            identityCard
             requirements
+            diagnosticsCard
             actions
             Spacer(minLength: 0)
         }
@@ -32,6 +36,50 @@ private extension OnboardingView {
         }
     }
 
+    var identityCard: some View {
+        let cs = CodeSigningInfo.current()
+        let bundleId = Bundle.main.bundleIdentifier ?? "nil"
+        let exe = Bundle.main.executableURL?.path ?? "nil"
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("App identity")
+                    .font(.headline)
+                Spacer()
+                Text(cs.isSigned ? "Signed" : "Unsigned")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Bundle ID: \(bundleId)")
+                    .font(.callout)
+                Text("Team ID: \(cs.teamID ?? "nil")")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Text("Executable: \(exe)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            if !cs.isSigned {
+                Text("Unsigned apps often appear to “lose” permissions on restart. Use the build script with a stable Apple Development certificate.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("If permissions feel flaky, make sure you always launch the same signed .app (not multiple copies).")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(12)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(.white.opacity(0.10), lineWidth: 1)
+        )
+    }
+
     var requirements: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Permissions")
@@ -39,7 +87,7 @@ private extension OnboardingView {
 
             PermissionRow(
                 title: "Microphone",
-                subtitle: "Required for push-to-talk.",
+                subtitle: "Required. Used for push‑to‑talk dictation.",
                 statusText: authText(for: model.micStatus),
                 isGranted: model.micStatus == .authorized
             ) {
@@ -49,7 +97,7 @@ private extension OnboardingView {
 
             PermissionRow(
                 title: "Speech Recognition",
-                subtitle: "Used to transcribe what you say.",
+                subtitle: "Required. Transcribes what you say.",
                 statusText: authText(for: model.speechStatus),
                 isGranted: model.speechStatus == .authorized
             ) {
@@ -59,7 +107,7 @@ private extension OnboardingView {
 
             PermissionRow(
                 title: "Screen Recording",
-                subtitle: "Required for screenshots. If you enable it in System Settings, you must quit & relaunch grabthis.",
+                subtitle: "Required. Allows grabthis to capture the active window screenshot.",
                 statusText: model.screenRecordingAllowed ? "Allowed" : "Not allowed",
                 isGranted: model.screenRecordingAllowed
             ) {
@@ -70,30 +118,80 @@ private extension OnboardingView {
             if !model.screenRecordingAllowed {
                 ActionRow(
                     title: "Screen Recording Settings",
-                    subtitle: "If the system prompt keeps showing, toggle grabthis ON here, then quit & relaunch.",
+                    subtitle: "After enabling, macOS requires you to quit & relaunch grabthis.",
                     buttonTitle: "Open Settings"
                 ) {
                     SystemSettingsDeepLinks.openScreenRecording()
+                }
+
+                ActionRow(
+                    title: "Quit & relaunch",
+                    subtitle: "After you enable Screen Recording, quit grabthis and open it again.",
+                    buttonTitle: "Quit grabthis"
+                ) {
+                    NSApp.terminate(nil)
                 }
             }
 
             ActionRow(
                 title: "Input Monitoring",
-                subtitle: "Required so grabthis can detect fn/shortcuts globally while you’re in other apps.",
+                subtitle: "Required. Lets grabthis detect fn/shortcuts globally while you’re in other apps.",
                 buttonTitle: "Open Settings"
             ) {
                 SystemSettingsDeepLinks.openInputMonitoring()
             }
 
-            ActionRow(
-                title: "Accessibility",
-                subtitle: "Required to auto-insert dictated text into other apps (Wispr-like).",
-                buttonTitle: "Open Settings"
-            ) {
-                SystemSettingsDeepLinks.openAccessibility()
-                AutoInsertService.requestAccessibilityPermissionPrompt()
+            VStack(alignment: .leading, spacing: 10) {
+                Toggle("Enable auto‑insert into the current app", isOn: $wantsAutoInsert)
+                    .font(.subheadline.weight(.semibold))
+                Text("If enabled, grabthis will try to paste into Cursor and other apps automatically.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(12)
+            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+            if wantsAutoInsert {
+                PermissionRow(
+                    title: "Accessibility",
+                    subtitle: "Required (for auto‑insert). Allows grabthis to paste into other apps.",
+                    statusText: model.accessibilityTrusted ? "Allowed" : "Not allowed",
+                    isGranted: model.accessibilityTrusted
+                ) {
+                    SystemSettingsDeepLinks.openAccessibility()
+                    AutoInsertService.requestAccessibilityPermissionPrompt()
+                    model.refresh()
+                }
+                .disabled(!model.isBundledApp)
             }
         }
+    }
+
+    var diagnosticsCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Diagnostics")
+                    .font(.headline)
+                Spacer()
+                if didCopyDiagnostics {
+                    Text("Copied")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Text("If something feels off, copy this and paste it in an issue/logs.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            Button("Copy diagnostics") { copyDiagnostics() }
+                .buttonStyle(.bordered)
+        }
+        .padding(12)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(.white.opacity(0.10), lineWidth: 1)
+        )
     }
 
     var actions: some View {
@@ -116,11 +214,37 @@ private extension OnboardingView {
         && model.micStatus == .authorized
         && model.speechStatus == .authorized
         && model.screenRecordingAllowed
+        && (!wantsAutoInsert || model.accessibilityTrusted)
     }
 
     func markCompleteAndClose() {
         model.markComplete()
         NSApp.keyWindow?.close()
+    }
+
+    func copyDiagnostics() {
+        let cs = CodeSigningInfo.current()
+        let bundleId = Bundle.main.bundleIdentifier ?? "nil"
+        let exe = Bundle.main.executableURL?.path ?? "nil"
+        let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "nil"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "nil"
+
+        let text = """
+        grabthis diagnostics
+        - bundleId: \(bundleId)
+        - exe: \(exe)
+        - version: \(appVersion) (\(build))
+        - codesign: \(cs.statusDescription) signed=\(cs.isSigned) teamId=\(cs.teamID ?? "nil") signingId=\(cs.signingIdentifier ?? "nil")
+        - mic: \(authText(for: model.micStatus))
+        - speech: \(authText(for: model.speechStatus))
+        - screenRecording: \(model.screenRecordingAllowed ? "Allowed" : "Not allowed")
+        - accessibility: \(model.accessibilityTrusted ? "Allowed" : "Not allowed")
+        - wantsAutoInsert: \(wantsAutoInsert)
+        """
+
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        didCopyDiagnostics = true
     }
 
     func authText(for status: AVAuthorizationStatus) -> String {
