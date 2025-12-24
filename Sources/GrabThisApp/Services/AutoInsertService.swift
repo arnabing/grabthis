@@ -158,6 +158,19 @@ enum AutoInsertService {
         let subrole = (subroleObj as? String) ?? "unknown"
         Log.autoInsert.info("AX focused role=\(role, privacy: .public) subrole=\(subrole, privacy: .public)")
 
+        // Guard: do not auto-insert into secure fields (passwords).
+        if subrole.localizedCaseInsensitiveContains("secure") || role.localizedCaseInsensitiveContains("secure") {
+            Log.autoInsert.error("AX insert blocked: secure field role=\(role, privacy: .public) subrole=\(subrole, privacy: .public)")
+            return false
+        }
+
+        // Web/Electron fields often report success for SelectedText but don’t commit the change.
+        // For these, prefer paste-based strategies (Cmd+V) instead of AX value setting.
+        if role == "AXTextArea", subrole == "unknown" {
+            Log.autoInsert.info("AX selectedText skipped for AXTextArea/unknown (prefer paste)")
+            return false
+        }
+
         // Prefer replacing selected text (safe for insertion at caret when selection is empty).
         let selectedSetErr = AXUIElementSetAttributeValue(focused, kAXSelectedTextAttribute as CFString, text as CFTypeRef)
         if selectedSetErr == .success {
