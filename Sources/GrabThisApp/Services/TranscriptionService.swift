@@ -176,7 +176,40 @@ private extension TranscriptionService {
     nonisolated static func makeTapBlock(_ request: SFSpeechAudioBufferRecognitionRequest) -> (AVAudioPCMBuffer, AVAudioTime) -> Void {
         { buffer, _ in
             request.append(buffer)
+            // Drive notch visualizer with real mic level (safe for audio thread).
+            let rms = computeRMS(buffer)
+            AudioLevelService.ingestFromAudioThread(rms: rms)
         }
+    }
+
+    nonisolated static func computeRMS(_ buffer: AVAudioPCMBuffer) -> Float {
+        let frameLength = Int(buffer.frameLength)
+        guard frameLength > 0 else { return 0 }
+
+        // Prefer float samples.
+        if let data = buffer.floatChannelData {
+            let ch0 = data[0]
+            var sum: Float = 0
+            for i in 0..<frameLength {
+                let v = ch0[i]
+                sum += v * v
+            }
+            return sqrt(sum / Float(frameLength))
+        }
+
+        // Fallback: int16 samples.
+        if let data = buffer.int16ChannelData {
+            let ch0 = data[0]
+            var sum: Float = 0
+            let denom: Float = 32768.0
+            for i in 0..<frameLength {
+                let v = Float(ch0[i]) / denom
+                sum += v * v
+            }
+            return sqrt(sum / Float(frameLength))
+        }
+
+        return 0
     }
 }
 

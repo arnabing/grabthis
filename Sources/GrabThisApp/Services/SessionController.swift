@@ -22,6 +22,7 @@ final class SessionController: ObservableObject {
     private let transcription: TranscriptionService
     private let history = SessionHistoryStore.shared
     private var transcriptionTask: Task<Void, Never>?
+    private var levelTask: Task<Void, Never>?
     private var targetPIDForInsert: pid_t?
     private var listeningStartedAt: Date?
     private var currentSessionId: UUID?
@@ -31,6 +32,7 @@ final class SessionController: ObservableObject {
     init(overlay: OverlayPanelController) {
         self.overlay = overlay
         self.transcription = TranscriptionService()
+        self.overlay.presentIdleChip()
     }
 
     func begin() {
@@ -61,6 +63,8 @@ final class SessionController: ObservableObject {
         transcriptDraft = ""
         transcriptionTask?.cancel()
         transcriptionTask = nil
+        levelTask?.cancel()
+        levelTask = nil
 
         overlay.presentListening(
             appName: appContext?.appName ?? "Unknown",
@@ -107,6 +111,15 @@ final class SessionController: ObservableObject {
                 self.overlay.updateListening(transcript: text)
             }
         }
+
+        // Stream mic level updates into overlay.
+        levelTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            for await lvl in AudioLevelService.shared.$level.values {
+                guard self.phase == .listening else { break }
+                self.overlay.model.audioLevel = lvl
+            }
+        }
     }
 
     func end() {
@@ -114,10 +127,13 @@ final class SessionController: ObservableObject {
         Log.session.info("end()")
         transcriptionTask?.cancel()
         transcriptionTask = nil
+        levelTask?.cancel()
+        levelTask = nil
         Task { @MainActor in
             await self.transcription.stopAndFinalize()
             self.transcriptDraft = self.transcription.finalText.isEmpty ? self.transcription.partialText : self.transcription.finalText
             self.overlay.setAccessibilityTrusted(AutoInsertService.isAccessibilityTrusted())
+            self.overlay.model.audioLevel = 0.0
 
             if !self.transcriptDraft.isEmpty {
                 // Ensure overlay doesn't interfere with focus/paste timing.
@@ -195,9 +211,11 @@ final class SessionController: ObservableObject {
         transcription.reset()
         transcriptionTask?.cancel()
         transcriptionTask = nil
+        levelTask?.cancel()
+        levelTask = nil
         targetPIDForInsert = nil
         phase = .idle
-        overlay.hide()
+        overlay.presentIdleChip()
         Log.app.info("session cancel()")
     }
 
@@ -260,12 +278,14 @@ private extension SessionController {
         transcription.reset()
         transcriptionTask?.cancel()
         transcriptionTask = nil
+        levelTask?.cancel()
+        levelTask = nil
         targetPIDForInsert = nil
         screenshot = nil
         transcriptDraft = ""
         appContext = nil
         phase = .idle
-        overlay.hide()
+        overlay.presentIdleChip()
     }
 }
 
