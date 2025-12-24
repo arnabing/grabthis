@@ -24,7 +24,7 @@ final class OverlayPanelController {
         @Published var accessibilityTrusted: Bool = true
         @Published var audioLevel: Double = 0.0 // 0...1
         @Published var isHovering: Bool = false
-        @Published var notchGapWidth: Double = AppState.shared.notchGapWidth
+        @Published var centerReserveWidth: Double = 220
 
         // Actions (wired by SessionController)
         var onSend: (() -> Void)?
@@ -39,7 +39,6 @@ final class OverlayPanelController {
     private var hostingController: NSHostingController<OverlayRootView>?
     private var autoDismissWork: DispatchWorkItem?
     private var hoverCancellable: AnyCancellable?
-    private var settingsCancellable: AnyCancellable?
 
     var isOverlayKeyWindow: Bool { panel?.isKeyWindow ?? false }
 
@@ -136,11 +135,6 @@ private extension OverlayPanelController {
                     self.scheduleAutoDismiss(seconds: 3.0)
                 }
             }
-
-            // Keep notch gap width in sync with Settings.
-            settingsCancellable = AppState.shared.$notchGapWidth.sink { [weak self] w in
-                self?.model.notchGapWidth = w
-            }
         }
 
         // In the listening/processing states, the overlay should never steal focus.
@@ -161,16 +155,30 @@ private extension OverlayPanelController {
     func positionPanel(size: NSSize) {
         guard let screen = NSScreen.main ?? NSScreen.screens.first, let p = panel else { return }
 
-        p.setContentSize(size)
+        // Clamp width to screen so the island is always “deliberate” on external displays.
+        let full = screen.frame
+        let clampedWidth = min(size.width, max(320, full.width - 60))
+        let clampedSize = NSSize(width: clampedWidth, height: size.height)
+        p.setContentSize(clampedSize)
+
+        // Reserve space in the center so content doesn't get eaten by the notch cutout.
+        model.centerReserveWidth = centerReserveWidth(for: screen)
 
         // Notch-ish positioning: top-center, anchored near the menu bar / safe area inset.
         // We avoid exact notch geometry (not public) and approximate using safe area inset.
-        let full = screen.frame
         let topInset = screen.safeAreaInsets.top
-        let x = full.midX - size.width / 2
+        let x = full.midX - clampedSize.width / 2
         // Place within the menu bar/safe-area region, with a small downward offset so it “hugs” the notch.
-        let y = full.maxY - topInset + 6 - size.height
-        p.setFrame(NSRect(x: x, y: y, width: size.width, height: size.height), display: true)
+        let y = full.maxY - topInset + 6 - clampedSize.height
+        p.setFrame(NSRect(x: x, y: y, width: clampedSize.width, height: clampedSize.height), display: true)
+    }
+
+    func centerReserveWidth(for screen: NSScreen) -> Double {
+        // Heuristic: built-in displays with notch need a larger reserved center area.
+        // External displays still reserve a little, but less (the bar is decorative there).
+        let name = screen.localizedName.lowercased()
+        let isBuiltIn = name.contains("built") || name.contains("color lcd") || name.contains("retina")
+        return isBuiltIn ? 240 : 120
     }
 
     func scheduleAutoDismiss(seconds: TimeInterval) {
@@ -221,8 +229,8 @@ private struct IdleChip: View {
     @ObservedObject var model: OverlayPanelController.Model
 
     var body: some View {
-        SplitNotchIsland(
-            notchGapWidth: model.notchGapWidth,
+        NotchIsland(
+            centerReserveWidth: model.centerReserveWidth,
             left: {
                 HStack(spacing: 10) {
                     Circle()
@@ -230,14 +238,14 @@ private struct IdleChip: View {
                         .frame(width: 6, height: 6)
                     Text(model.isHovering ? "Hold fn to talk" : "grabthis")
                         .font(.callout.weight(.semibold))
-                        .foregroundStyle(.primary)
+                        .foregroundStyle(.white.opacity(0.92))
                 }
             },
             right: {
                 // Keep right side extremely quiet in idle.
                 Image(systemName: "waveform")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.white.opacity(0.55))
             }
         )
         .scaleEffect(model.isHovering ? 1.03 : 1.0)
@@ -255,8 +263,8 @@ private struct ListeningCard: View {
     @State private var pulse = false
 
     var body: some View {
-        SplitNotchIsland(
-            notchGapWidth: model.notchGapWidth,
+        NotchIsland(
+            centerReserveWidth: model.centerReserveWidth,
             isActiveGlow: true,
             left: {
                 HStack(spacing: 12) {
@@ -290,7 +298,7 @@ private struct ListeningCard: View {
                 // Keep right side minimal while FN is held: subtle mic glyph.
                 Image(systemName: "mic.fill")
                     .font(.callout.weight(.semibold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.white.opacity(0.55))
             }
         )
         .padding(.horizontal, 6)
@@ -300,32 +308,19 @@ private struct ListeningCard: View {
     }
 }
 
-private struct SplitNotchIsland<Left: View, Right: View>: View {
-    let notchGapWidth: Double
+private struct NotchIsland<Left: View, Right: View>: View {
+    let centerReserveWidth: Double
     var isActiveGlow: Bool = false
     @ViewBuilder let left: () -> Left
     @ViewBuilder let right: () -> Right
 
     var body: some View {
-        HStack(spacing: 0) {
-            capsule(content: left)
-            Spacer().frame(width: max(90, notchGapWidth))
-            capsule(content: right)
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    private func capsule<Content: View>(@ViewBuilder content: () -> Content) -> some View {
         ZStack {
-            Capsule()
-                .fill(.ultraThinMaterial)
-                .overlay(
-                    Capsule()
-                        .strokeBorder(Color.white.opacity(0.10), lineWidth: 1)
-                )
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(Color.black)
                 .overlay {
                     if isActiveGlow {
-                        Capsule()
+                        RoundedRectangle(cornerRadius: 22, style: .continuous)
                             .strokeBorder(
                                 LinearGradient(
                                     colors: [
@@ -342,14 +337,25 @@ private struct SplitNotchIsland<Left: View, Right: View>: View {
                             .opacity(0.95)
                     }
                 }
-                .shadow(color: isActiveGlow ? Color.cyan.opacity(0.18) : .clear, radius: 14, y: 0)
+                .shadow(color: isActiveGlow ? Color.cyan.opacity(0.16) : .clear, radius: 14, y: 0)
                 .shadow(color: isActiveGlow ? Color.purple.opacity(0.10) : .clear, radius: 18, y: 0)
 
-            HStack(spacing: 10) {
-                content()
-                Spacer(minLength: 0)
+            HStack(spacing: 0) {
+                HStack(spacing: 10) {
+                    left()
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity)
+
+                Spacer().frame(width: max(90, centerReserveWidth))
+
+                HStack(spacing: 10) {
+                    Spacer(minLength: 0)
+                    right()
+                }
+                .frame(maxWidth: .infinity)
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 16)
             .padding(.vertical, 10)
         }
         .frame(height: 44)
