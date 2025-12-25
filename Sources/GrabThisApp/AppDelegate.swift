@@ -24,6 +24,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupStatusItem()
         maybeShowOnboarding()
         hotkeyService.start()
+
+        // Force SessionController initialization to show idle chip on startup
+        _ = sessionController
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

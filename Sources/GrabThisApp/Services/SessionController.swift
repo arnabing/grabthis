@@ -132,12 +132,14 @@ final class SessionController: ObservableObject {
         Task { @MainActor in
             await self.transcription.stopAndFinalize()
             self.transcriptDraft = self.transcription.finalText.isEmpty ? self.transcription.partialText : self.transcription.finalText
+            // FIX: Update overlay transcript IMMEDIATELY to prevent blank state during auto-insert delay
+            self.overlay.updateListening(transcript: self.transcriptDraft)
             self.overlay.setAccessibilityTrusted(AutoInsertService.isAccessibilityTrusted())
             self.overlay.model.audioLevel = 0.0
 
             if !self.transcriptDraft.isEmpty {
-                // Ensure overlay doesn't interfere with focus/paste timing.
-                self.overlay.hide()
+                // Don't hide overlay - let it transition smoothly from listening → review
+                // The presentReview() call below will update the mode with animation
 
                 let targetPID = self.targetPIDForInsert
                 let targetAppName = self.appContext?.appName ?? "Unknown"
