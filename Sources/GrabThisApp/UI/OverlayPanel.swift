@@ -365,131 +365,162 @@ private struct OverlayRootView: View {
         }
     }
 
-    // MARK: - Content Views (boring.notch pattern: mutually exclusive if/else)
+    // MARK: - Content Views (boring.notch pattern: header always present + body inserted)
 
     @ViewBuilder
     private var notchContent: some View {
-        // MUTUALLY EXCLUSIVE - only one content tree exists at a time (boring.notch pattern)
-        // This prevents dual content conflict where both closed and expanded show simultaneously
-        if model.isOpen {
-            expandedContent
-                .id("expanded")  // Force unique view identity for repeated transitions
-                .transition(
-                    .scale(scale: 0.8, anchor: .top)
-                    .combined(with: .opacity)
-                    .animation(.smooth(duration: 0.35))
-                )
-        } else {
-            closedContent
-                .id("closed")  // Force unique view identity for repeated transitions
+        // boring.notch pattern: header is ALWAYS present, body is ADDED when open
+        // This ensures transitions fire correctly on every open/close cycle
+        VStack(alignment: .leading, spacing: 0) {
+            // HEADER - always present, content varies by state
+            headerContent
+                .zIndex(2)
+
+            // BODY - only when open, this gets the transition
+            if model.isOpen {
+                bodyContent
+                    .transition(
+                        .scale(scale: 0.8, anchor: .top)
+                        .combined(with: .opacity)
+                        .animation(.smooth(duration: 0.35))
+                    )
+                    .zIndex(1)
+            }
         }
     }
 
     @ViewBuilder
-    private var closedContent: some View {
+    private var headerContent: some View {
+        // Header row - always present at notch height, content changes based on state
         switch model.mode {
         case .hidden:
             EmptyView()
         case .idleChip:
-            IdleChipContent(model: model)
+            NotchHeader(
+                model: model,
+                statusColor: .cyan,
+                statusText: model.isHovering ? "Hold fn to talk" : "grabthis",
+                showPulse: false,
+                showCloseButton: model.isOpen,
+                rightContent: { EmptyView() }
+            )
         case .listening:
-            if model.hasPhysicalNotch {
+            if model.hasPhysicalNotch && !model.isOpen {
                 ListeningSplitContent(model: model)
             } else {
-                ListeningContent(model: model)
+                NotchHeader(
+                    model: model,
+                    statusColor: .cyan,
+                    statusText: "Listening...",
+                    showPulse: true,
+                    showCloseButton: false,
+                    rightContent: { AudioBarVisualizer() }
+                )
             }
-        case .review, .processing, .response, .error:
-            EmptyView()  // Open-only modes have no closed content
+        case .review:
+            NotchHeader(
+                model: model,
+                statusColor: .green,
+                statusText: "Ready",
+                showPulse: false,
+                showCloseButton: true,
+                rightContent: { EmptyView() }
+            )
+        case .processing:
+            NotchHeader(
+                model: model,
+                statusColor: .orange,
+                statusText: "Processing...",
+                showPulse: true,
+                showCloseButton: false,
+                rightContent: {
+                    ProgressView()
+                        .scaleEffect(0.7)
+                        .tint(.white)
+                }
+            )
+        case .response:
+            NotchHeader(
+                model: model,
+                statusColor: .green,
+                statusText: "Done",
+                showPulse: false,
+                showCloseButton: true,
+                rightContent: { EmptyView() }
+            )
+        case .error:
+            NotchHeader(
+                model: model,
+                statusColor: .red,
+                statusText: "Error",
+                showPulse: false,
+                showCloseButton: true,
+                rightContent: { EmptyView() }
+            )
         }
     }
 
     @ViewBuilder
-    private var expandedContent: some View {
+    private var bodyContent: some View {
+        // Body content - only shown when open
         switch model.mode {
         case .hidden:
             EmptyView()
         case .idleChip:
-            IdleExpandedContent(model: model)
+            IdleBodyContent()
         case .listening, .review:
-            // UNIFIED VIEW - seamless transition between listening and ready
-            ActiveSessionContent(model: model)
+            ActiveSessionBodyContent(model: model)
         case .processing:
-            ProcessingCard()
+            ProcessingBodyContent()
         case .response:
-            ResponseCard(model: model, isError: false)
+            ResponseBodyContent(model: model, isError: false)
         case .error:
-            ResponseCard(model: model, isError: true)
+            ResponseBodyContent(model: model, isError: true)
         }
     }
 }
 
-// MARK: - Closed State Content (no explicit height - sizes naturally)
+// MARK: - Unified Header Component (always present)
 
-private struct IdleChipContent: View {
+private struct NotchHeader<RightContent: View>: View {
     @ObservedObject var model: OverlayPanelController.Model
+    let statusColor: Color
+    let statusText: String
+    let showPulse: Bool
+    let showCloseButton: Bool
+    @ViewBuilder let rightContent: () -> RightContent
 
-    var body: some View {
-        HStack(spacing: 10) {
-            Circle()
-                .fill(Color.cyan.opacity(0.9))
-                .frame(width: 6, height: 6)
-            Text(model.isHovering ? "Hold fn to talk" : "grabthis")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.white.opacity(0.92))
-            Spacer(minLength: 0)
-            // No static icon - idle state is clean (boring.notch pattern)
-        }
-        .frame(width: model.closedNotchSize.width - 20, height: model.closedNotchSize.height)
-    }
-}
-
-private struct ListeningContent: View {
-    @ObservedObject var model: OverlayPanelController.Model
     @State private var pulse = false
 
     var body: some View {
-        HStack(spacing: 12) {
-            AudioBarVisualizer()
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(Color.cyan.opacity(0.95))
-                    .frame(width: 8, height: 8)
-                    .scaleEffect(pulse ? 1.6 : 1.0)
-                    .opacity(pulse ? 0.55 : 1.0)
-                    .onAppear {
+        HStack(spacing: model.isOpen ? 10 : 8) {
+            // Status indicator
+            Circle()
+                .fill(statusColor.opacity(0.95))
+                .frame(width: model.isOpen ? 10 : 6, height: model.isOpen ? 10 : 6)
+                .scaleEffect(showPulse && pulse ? 1.4 : 1.0)
+                .opacity(showPulse && pulse ? 0.6 : 1.0)
+                .onAppear {
+                    if showPulse {
                         withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
                             pulse = true
                         }
                     }
-                Text("Listening")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.white)
-            }
-            Spacer(minLength: 0)
-            Image(systemName: "mic.fill")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.white.opacity(0.55))
-        }
-        .frame(width: model.closedNotchSize.width - 20, height: model.closedNotchSize.height)
-        .animation(.spring(response: 0.30, dampingFraction: 0.78), value: model.audioLevel)
-    }
-}
+                }
 
-// MARK: - Expanded Content Views (for hover/auto-expand)
+            // Status text
+            Text(statusText)
+                .font(model.isOpen ? .headline : .caption.weight(.semibold))
+                .foregroundStyle(.white.opacity(model.isOpen ? 1.0 : 0.92))
+                .contentTransition(.interpolate)
 
-private struct IdleExpandedContent: View {
-    @ObservedObject var model: OverlayPanelController.Model
+            Spacer()
 
-    var body: some View {
-        VStack(spacing: 12) {
-            HStack {
-                Image(systemName: "waveform.circle.fill")
-                    .font(.title2)
-                    .foregroundStyle(.cyan)
-                Text("GrabThis")
-                    .font(.headline)
-                    .foregroundStyle(.white)
-                Spacer()
+            // Right content (visualizer, progress, etc.)
+            rightContent()
+
+            // Close button (only when open and requested)
+            if showCloseButton && model.isOpen {
                 Button(action: { model.onClose?() }) {
                     Image(systemName: "xmark.circle.fill")
                         .font(.title3)
@@ -497,82 +528,40 @@ private struct IdleExpandedContent: View {
                 }
                 .buttonStyle(.plain)
             }
+        }
+        .frame(height: model.isOpen ? max(24, model.closedNotchSize.height) : model.closedNotchSize.height)
+        .frame(maxWidth: model.isOpen ? .infinity : model.closedNotchSize.width - 20)
+        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: model.isOpen)
+        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: statusColor)
+    }
+}
 
+// MARK: - Body Content Views (only shown when open)
+
+private struct IdleBodyContent: View {
+    var body: some View {
+        VStack(spacing: 12) {
             Text("Press fn to start listening")
                 .font(.body)
                 .foregroundStyle(.white.opacity(0.7))
                 .frame(maxWidth: .infinity, alignment: .leading)
-
             Spacer()
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.top, 8)
+        .padding(.bottom, 12)
     }
 }
 
-// MARK: - Unified Active Session Content (Listening + Review)
-// This provides seamless transition between listening and ready states
-// by keeping the same view identity and animating individual properties
-
-private struct ActiveSessionContent: View {
+private struct ActiveSessionBodyContent: View {
     @ObservedObject var model: OverlayPanelController.Model
-    @State private var pulse = false
 
     private var isListening: Bool { model.mode == .listening }
     private var isReady: Bool { model.mode == .review }
 
-    private var statusColor: Color {
-        isListening ? .cyan : .green
-    }
-
-    private var statusText: String {
-        isListening ? "Listening..." : "Ready"
-    }
-
     var body: some View {
         VStack(spacing: 12) {
-            // Header row - elements animate individually
-            HStack {
-                // Status indicator - color animates, pulse only when listening
-                Circle()
-                    .fill(statusColor.opacity(0.95))
-                    .frame(width: 10, height: 10)
-                    .scaleEffect(isListening && pulse ? 1.4 : 1.0)
-                    .opacity(isListening && pulse ? 0.6 : 1.0)
-                    .onAppear {
-                        withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
-                            pulse = true
-                        }
-                    }
-
-                // Status text - crossfades between states
-                Text(statusText)
-                    .font(.headline)
-                    .foregroundStyle(.white)
-                    .contentTransition(.interpolate)
-
-                Spacer()
-
-                // Right area - conditional content with crossfade
-                ZStack {
-                    if isListening {
-                        AudioBarVisualizer()
-                            .transition(.opacity)
-                    }
-                    if isReady {
-                        Button(action: { model.onClose?() }) {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.title3)
-                                .foregroundStyle(.white.opacity(0.5))
-                        }
-                        .buttonStyle(.plain)
-                        .transition(.opacity)
-                    }
-                }
-                .animation(.easeInOut(duration: 0.25), value: model.mode)
-            }
-
-            // Transcript - STAYS IN PLACE (key for seamless feel)
+            // Transcript
             if !model.transcript.isEmpty {
                 Text(model.transcript)
                     .font(.body)
@@ -619,9 +608,58 @@ private struct ActiveSessionContent: View {
             }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.top, 8)
+        .padding(.bottom, 12)
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: model.mode)
-        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: statusColor)
+        .onHover { model.isHovering = $0 }
+    }
+}
+
+private struct ProcessingBodyContent: View {
+    var body: some View {
+        VStack(spacing: 12) {
+            Text("Preparing your request")
+                .font(.body)
+                .foregroundStyle(.white.opacity(0.5))
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 12)
+    }
+}
+
+private struct ResponseBodyContent: View {
+    @ObservedObject var model: OverlayPanelController.Model
+    let isError: Bool
+
+    var body: some View {
+        VStack(spacing: 12) {
+            // Response text
+            Text(model.responseText)
+                .font(.body)
+                .foregroundStyle(.white.opacity(0.9))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .lineLimit(4)
+
+            Spacer()
+
+            // Action buttons at bottom
+            HStack(spacing: 12) {
+                Button(action: { model.onCopy?() }) {
+                    Label("Copy", systemImage: "doc.on.doc")
+                        .font(.callout.weight(.medium))
+                }
+                .buttonStyle(.bordered)
+                .tint(.white.opacity(0.8))
+
+                Spacer()
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 12)
         .onHover { model.isHovering = $0 }
     }
 }
@@ -666,168 +704,6 @@ private struct ListeningSplitContent: View {
         }
         .frame(height: model.closedNotchSize.height)
         .animation(.spring(response: 0.30, dampingFraction: 0.78), value: model.audioLevel)
-    }
-}
-
-// MARK: - Open State Content (explicit heights OK)
-
-private struct ReviewCard: View {
-    @ObservedObject var model: OverlayPanelController.Model
-    @State private var draft: String = ""
-
-    var body: some View {
-        VStack(spacing: 12) {
-            // Header row - matches ListeningExpandedContent style
-            HStack {
-                Circle()
-                    .fill(Color.green.opacity(0.95))
-                    .frame(width: 10, height: 10)
-                Text("Ready")
-                    .font(.headline)
-                    .foregroundStyle(.white)
-                Spacer()
-                Button(action: { model.onClose?() }) {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.title3)
-                        .foregroundStyle(.white.opacity(0.5))
-                }
-                .buttonStyle(.plain)
-            }
-
-            // Transcript text - same style as listening
-            if !model.transcript.isEmpty {
-                Text(model.transcript)
-                    .font(.body)
-                    .foregroundStyle(.white.opacity(0.9))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .lineLimit(4)
-            } else {
-                Text("No transcript")
-                    .font(.body)
-                    .foregroundStyle(.white.opacity(0.5))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            Spacer()
-
-            // Action buttons at bottom
-            HStack(spacing: 12) {
-                Button(action: { model.onInsert?() }) {
-                    Label("Insert", systemImage: "text.insert")
-                        .font(.callout.weight(.medium))
-                }
-                .buttonStyle(.bordered)
-                .tint(.white.opacity(0.8))
-
-                Button(action: { model.onCopy?() }) {
-                    Label("Copy", systemImage: "doc.on.doc")
-                        .font(.callout.weight(.medium))
-                }
-                .buttonStyle(.bordered)
-                .tint(.white.opacity(0.8))
-
-                Spacer()
-
-                Button(action: { model.onSend?() }) {
-                    Label("Send", systemImage: "paperplane.fill")
-                        .font(.callout.weight(.medium))
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.cyan)
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .onAppear { draft = model.transcript }
-        .onHover { model.isHovering = $0 }
-    }
-}
-
-private struct ProcessingCard: View {
-    @State private var pulse = false
-
-    var body: some View {
-        VStack(spacing: 12) {
-            // Header row - matches other expanded content styles
-            HStack {
-                Circle()
-                    .fill(Color.orange.opacity(0.95))
-                    .frame(width: 10, height: 10)
-                    .scaleEffect(pulse ? 1.4 : 1.0)
-                    .opacity(pulse ? 0.6 : 1.0)
-                    .onAppear {
-                        withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
-                            pulse = true
-                        }
-                    }
-                Text("Processing...")
-                    .font(.headline)
-                    .foregroundStyle(.white)
-                Spacer()
-                ProgressView()
-                    .scaleEffect(0.7)
-                    .tint(.white)
-            }
-
-            Text("Preparing your request")
-                .font(.body)
-                .foregroundStyle(.white.opacity(0.5))
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            Spacer()
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-    }
-}
-
-private struct ResponseCard: View {
-    @ObservedObject var model: OverlayPanelController.Model
-    let isError: Bool
-
-    var body: some View {
-        VStack(spacing: 12) {
-            // Header row - matches other expanded content styles
-            HStack {
-                Circle()
-                    .fill(isError ? Color.red.opacity(0.95) : Color.green.opacity(0.95))
-                    .frame(width: 10, height: 10)
-                Text(isError ? "Error" : "Done")
-                    .font(.headline)
-                    .foregroundStyle(.white)
-                Spacer()
-                Button(action: { model.onClose?() }) {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.title3)
-                        .foregroundStyle(.white.opacity(0.5))
-                }
-                .buttonStyle(.plain)
-            }
-
-            // Response text - same style as transcript
-            Text(model.responseText)
-                .font(.body)
-                .foregroundStyle(.white.opacity(0.9))
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .lineLimit(4)
-
-            Spacer()
-
-            // Action buttons at bottom
-            HStack(spacing: 12) {
-                Button(action: { model.onCopy?() }) {
-                    Label("Copy", systemImage: "doc.on.doc")
-                        .font(.callout.weight(.medium))
-                }
-                .buttonStyle(.bordered)
-                .tint(.white.opacity(0.8))
-
-                Spacer()
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .onHover { model.isHovering = $0 }
     }
 }
 
