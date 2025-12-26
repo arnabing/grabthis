@@ -99,9 +99,12 @@ final class OverlayPanelController {
         @Published var isOpen: Bool = false  // Now a stored property
         @Published var closedNotchSize: CGSize = getClosedNotchSize()
 
-        // First launch hello animation (from boring.notch)
-        @AppStorage("hasShownFirstHint") var hasShownFirstHint: Bool = false
-        @Published var helloAnimationRunning: Bool = false
+        // Startup glow animation (runs every app launch)
+        var hasShownGreetingThisSession: Bool = false  // Session-based, not persisted
+        @Published var glowAnimationRunning: Bool = false
+
+        // Review glow animation (runs after recording stops)
+        @Published var reviewGlowRunning: Bool = false
 
         var hasPhysicalNotch: Bool {
             guard let screen = NSScreen.main else { return false }
@@ -132,13 +135,12 @@ final class OverlayPanelController {
     }
 
     func presentIdleChip() {
-        // First launch: trigger hello animation (from boring.notch)
-        if !model.hasShownFirstHint && !model.helloAnimationRunning {
-            model.helloAnimationRunning = true
+        // Startup glow animation: runs every app launch (while notch stays closed)
+        if !model.hasShownGreetingThisSession && !model.glowAnimationRunning {
+            model.glowAnimationRunning = true
+            model.hasShownGreetingThisSession = true
             model.mode = .idleChip
-            withAnimation(openAnimation) {
-                model.isOpen = true
-            }
+            // Keep notch closed - glow traces the outside perimeter
             show()
             return  // Let animation handle the rest
         }
@@ -174,6 +176,7 @@ final class OverlayPanelController {
         model.appName = appName
         model.screenshot = screenshot
         model.transcript = transcript
+        // model.reviewGlowRunning = true  // Disabled for now - could use for AI loading
         withAnimation(openAnimation) {
             model.mode = .review
         }
@@ -326,6 +329,41 @@ private struct OverlayRootView: View {
                             .frame(height: 1)
                             .padding(.horizontal, topCornerRadius)
                     }
+                    .overlay(alignment: .top) {
+                        // Startup glow: rainbow trace around the closed notch perimeter
+                        if model.glowAnimationRunning {
+                            NotchGlowAnimation(
+                                topCornerRadius: cornerRadiusInsets.closed.top,
+                                bottomCornerRadius: cornerRadiusInsets.closed.bottom,
+                                onFinish: {
+                                    model.glowAnimationRunning = false
+                                }
+                            )
+                            .frame(width: model.closedNotchSize.width, height: model.closedNotchSize.height)
+                        }
+                    }
+                    .overlay {
+                        // Review glow: rainbow trace around expanded notch after recording
+                        if model.reviewGlowRunning {
+                            NotchGlowAnimation(
+                                topCornerRadius: cornerRadiusInsets.opened.top,
+                                bottomCornerRadius: cornerRadiusInsets.opened.bottom,
+                                duration: 1.5,  // Faster for expanded window
+                                lineWidth: 4,
+                                blurRadius: 6.0,
+                                onFinish: {
+                                    model.reviewGlowRunning = false
+                                    // Auto-dismiss to idle after glow completes
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                        withAnimation(closeAnimation) {
+                                            model.mode = .idleChip
+                                            model.isOpen = false
+                                        }
+                                    }
+                                }
+                            )
+                        }
+                    }
                     .shadow(color: (model.isOpen || model.isHovering) ? .black.opacity(0.7) : .clear, radius: 6)
                     // Use explicit closed height instead of nil - nil might not animate properly
                     .frame(height: model.isOpen ? openNotchSize.height : model.closedNotchSize.height)
@@ -387,34 +425,19 @@ private struct OverlayRootView: View {
         // boring.notch pattern: header is ALWAYS present, body is ADDED when open
         // This ensures transitions fire correctly on every open/close cycle
         VStack(alignment: .leading, spacing: 0) {
-            if model.helloAnimationRunning {
-                // First launch: show glowing snake animation (from boring.notch)
-                Spacer()
-                HelloAnimation(onFinish: {
-                    model.helloAnimationRunning = false
-                    model.hasShownFirstHint = true
-                    withAnimation(closeAnimation) {
-                        model.isOpen = false
-                    }
-                })
-                .frame(width: model.closedNotchSize.width, height: 80)
-                .padding(.top, 40)
-                Spacer()
-            } else {
-                // HEADER - always present, content varies by state
-                headerContent
-                    .zIndex(2)
+            // HEADER - always present, content varies by state
+            headerContent
+                .zIndex(2)
 
-                // BODY - only when open, this gets the transition
-                if model.isOpen {
-                    bodyContent
-                        .transition(
-                            .scale(scale: 0.8, anchor: .top)
-                            .combined(with: .opacity)
-                            .animation(.smooth(duration: 0.35))
-                        )
-                        .zIndex(1)
-                }
+            // BODY - only when open, this gets the transition
+            if model.isOpen {
+                bodyContent
+                    .transition(
+                        .scale(scale: 0.8, anchor: .top)
+                        .combined(with: .opacity)
+                        .animation(.smooth(duration: 0.35))
+                    )
+                    .zIndex(1)
             }
         }
     }

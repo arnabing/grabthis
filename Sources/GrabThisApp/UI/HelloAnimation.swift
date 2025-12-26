@@ -7,6 +7,101 @@
 
 import SwiftUI
 
+// MARK: - Notch Border Shape (for glow animation)
+
+struct NotchBorderShape: Shape {
+    var topCornerRadius: CGFloat = 6
+    var bottomCornerRadius: CGFloat = 14
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+
+        // Start at top-left and trace clockwise around the notch perimeter
+        path.move(to: CGPoint(x: rect.minX, y: rect.minY))
+
+        // Top-left curve (down)
+        path.addQuadCurve(
+            to: CGPoint(x: rect.minX + topCornerRadius, y: rect.minY + topCornerRadius),
+            control: CGPoint(x: rect.minX + topCornerRadius, y: rect.minY)
+        )
+
+        // Left edge (down)
+        path.addLine(to: CGPoint(x: rect.minX + topCornerRadius, y: rect.maxY - bottomCornerRadius))
+
+        // Bottom-left curve
+        path.addQuadCurve(
+            to: CGPoint(x: rect.minX + topCornerRadius + bottomCornerRadius, y: rect.maxY),
+            control: CGPoint(x: rect.minX + topCornerRadius, y: rect.maxY)
+        )
+
+        // Bottom edge
+        path.addLine(to: CGPoint(x: rect.maxX - topCornerRadius - bottomCornerRadius, y: rect.maxY))
+
+        // Bottom-right curve
+        path.addQuadCurve(
+            to: CGPoint(x: rect.maxX - topCornerRadius, y: rect.maxY - bottomCornerRadius),
+            control: CGPoint(x: rect.maxX - topCornerRadius, y: rect.maxY)
+        )
+
+        // Right edge (up)
+        path.addLine(to: CGPoint(x: rect.maxX - topCornerRadius, y: rect.minY + topCornerRadius))
+
+        // Top-right curve
+        path.addQuadCurve(
+            to: CGPoint(x: rect.maxX, y: rect.minY),
+            control: CGPoint(x: rect.maxX - topCornerRadius, y: rect.minY)
+        )
+
+        // Top edge back to start (closes the path)
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY))
+
+        return path
+    }
+}
+
+// MARK: - Notch Glow Animation (rainbow trace around closed notch perimeter)
+
+struct NotchGlowAnimation: View {
+    @State private var progress: Double = 0.0
+    var topCornerRadius: CGFloat = 6
+    var bottomCornerRadius: CGFloat = 14
+    var duration: Double = 2.5  // Animation duration in seconds
+    var lineWidth: CGFloat = 3
+    var blurRadius: CGFloat = 5.0
+    var onFinish: () -> Void
+
+    var body: some View {
+        GlowingSnake(
+            progress: progress,
+            delay: 0.25,  // Short tail for snappy feel
+            fill: .hello,  // Rainbow gradient
+            lineWidth: lineWidth,
+            blurRadius: blurRadius,
+            shape: {
+                NotchBorderShape(
+                    topCornerRadius: topCornerRadius,
+                    bottomCornerRadius: bottomCornerRadius
+                )
+            }
+        )
+        .task {
+            // Small delay for panel to appear
+            try? await Task.sleep(for: .seconds(0.2))
+
+            withAnimation(.easeInOut(duration: duration)) {
+                progress = 1.0
+            }
+
+            // Wait for animation to complete
+            try? await Task.sleep(for: .seconds(duration))
+
+            onFinish()
+        }
+    }
+}
+
+// MARK: - Hello Shape (cursive "hello" for first launch)
+
 struct HelloShape: Shape {
     func path(in rect: CGRect) -> Path {
         var path = Path()
