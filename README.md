@@ -1,47 +1,26 @@
 # grabthis (macOS)
 
-Push-to-talk screenshot + dictation overlay for macOS.
+Push-to-talk screenshot + dictation overlay for macOS, inspired by [boring.notch](https://github.com/TheBoredTeam/boring.notch).
 
 ## What it does
 - Hold `fn` (or fallback hotkey) to start a session
 - Captures the active window screenshot
-- Shows live transcription in a floating “liquid glass” overlay
-- On release: copies transcript and attempts auto-insert into the active app (Cursor-friendly fallbacks)
+- Shows live transcription in a floating notch overlay
+- On release: copies transcript and attempts auto-insert into the active app
 - Optional: Send screenshot + transcript to an LLM (WIP)
 
-## Wispr-like “smooth auto-insert” notes (Cursor)
-Cursor (Electron) can behave differently than native apps:
-- Some Accessibility “text set” APIs may report success without actually committing text in the editor.
-- Menu-based paste attempts can cause **visible menu bar flicker**.
-- The app can be “frontmost” before the editor/caret is ready to receive input.
+## Features
 
-To match Wispr Flow’s feel (fast + invisible), our approach is:
-- **Avoid menu interaction** for Cursor (no Edit/Paste menu opening).
-- **Avoid activation churn**: if Cursor is already frontmost, do not re-activate it.
-- Prefer **robust Cmd+V injection** (Cmd-down → V-down/up → Cmd-up with tiny delays + retries).
-- Keep clipboard correct for manual ⌘V, but (optional) **restore clipboard** after auto-insert to avoid clobbering the user’s clipboard (Wispr-like).
+### Notch UI (boring.notch inspired)
+- **Single continuous black island** that extends from the hardware notch
+- **Grow-from-top animation** when expanding (content scales from 0.8 to 1.0, anchored at top)
+- **First-launch hello animation** - glowing rainbow snake traces "hello" on first app start
+- **Split listening mode** on MacBooks with notch - pulsing dot on left, audio visualizer on right
+- **Smooth state transitions** between idle, listening, processing, and response states
 
-## Current Status
-
-### Notch UI (Recent Changes)
-
-We've refactored the overlay to use a **single continuous black island** (matching `boring.notch`'s design), but there are **known issues** that need fixing:
-
-1. **Positioning**: Island appears below the notch (should be at the very top)
-2. **Sizing**: Island is ~3× too wide
-3. **Text clipping**: Content gets cut off, black areas visible
-
-**Next step**: Audit `boring.notch` source code to understand their exact positioning/sizing approach, then port it to our `OverlayPanelController`.
-
-See:
-- `docs/CHANGELOG.md` - Recent changes summary
-- `docs/NOTCH_UI_STATUS.md` - Detailed status and next steps
-
-### Auto-insert (Cursor)
-
-Auto-insert is working for most apps (Notion, etc.) but can be finicky in Cursor. Current approach:
+### Auto-insert (Cursor-friendly)
 - Skip activation if Cursor is already frontmost
-- Prefer robust Cmd+V injection (Cmd-down → V-down/up → Cmd-up)
+- Prefer robust Cmd+V injection (Cmd-down -> V-down/up -> Cmd-up)
 - Skip menu-based paste for Cursor (avoids menu bar flicker)
 
 ## Building / Running
@@ -56,15 +35,28 @@ open "build/GrabThisApp.app"
 
 ## Permissions / TCC
 
-If permissions feel “lost” or you keep seeing prompts, it’s almost always **app identity** (bundle id + signing) or launching multiple copies of the app. See:
+If permissions feel "lost" or you keep seeing prompts, it's almost always **app identity** (bundle id + signing) or launching multiple copies of the app. See:
 
 - `docs/permissions.md`
 
+## Architecture
+
+### Overlay Panel (OverlayPanel.swift)
+Uses the **boring.notch pattern** for animations:
+- Header is ALWAYS present (content changes based on state)
+- Body is ADDED when open (with `.transition(.scale(scale: 0.8, anchor: .top))`)
+- This ensures transitions fire correctly on every open/close cycle
+
+### Animation Components (HelloAnimation.swift)
+- `HelloShape` - Custom bezier path that draws cursive "hello"
+- `GlowingSnake` - Animatable view with trim + multi-layer blur glow
+- Rainbow gradient: blue -> purple -> red -> mint -> indigo -> pink -> blue
+
 ## Troubleshooting
 
-### Auto-insert doesn’t paste into Cursor
-Auto-insert uses a few strategies (AX insert, Edit → Paste menu press, Cmd+V). Make sure:
-- System Settings → Privacy & Security → Accessibility: **grabthis ON**
+### Auto-insert doesn't paste into Cursor
+Auto-insert uses a few strategies (AX insert, Edit -> Paste menu press, Cmd+V). Make sure:
+- System Settings -> Privacy & Security -> Accessibility: **grabthis ON**
 - Cursor is focused in an editor at key-up.
 
 To inspect what happened:
@@ -73,4 +65,9 @@ To inspect what happened:
 log show --last 5m --predicate 'process == "GrabThisApp" && (category == "autoInsert" || category == "session")' --style compact | tail -n 220
 ```
 
-
+### Reset first-launch animation
+To see the hello animation again:
+```bash
+defaults delete com.grabthis.app hasShownFirstHint
+```
+Then relaunch the app.
