@@ -20,6 +20,7 @@ final class SessionController: ObservableObject {
 
     private let overlay: OverlayPanelController
     private let transcription: TranscriptionService
+    private let aiService = AIService()
     private let history = SessionHistoryStore.shared
     private var transcriptionTask: Task<Void, Never>?
     private var levelTask: Task<Void, Never>?
@@ -222,13 +223,25 @@ final class SessionController: ObservableObject {
     }
 
     func sendToAI() {
-        // Placeholder: will be wired to LLMService in the next todo.
         overlay.presentProcessing()
         phase = .processing
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-            guard let self else { return }
-            self.overlay.presentResponse("LLM wiring next — transcript ready.\n\n\(self.transcriptDraft)")
-            self.phase = .response
+        Log.app.info("sendToAI started with transcript: \(self.transcriptDraft.prefix(50), privacy: .public)...")
+
+        Task { @MainActor in
+            do {
+                let response = try await aiService.analyze(
+                    screenshot: screenshot?.image,
+                    prompt: transcriptDraft
+                )
+                overlay.presentResponse(response)
+                phase = .response
+                Log.app.info("AI response received: \(response.prefix(100), privacy: .public)...")
+            } catch {
+                let errorMessage = (error as? AIService.AIError)?.localizedDescription ?? error.localizedDescription
+                overlay.presentError(errorMessage)
+                phase = .error(message: errorMessage)
+                Log.app.error("AI request failed: \(errorMessage, privacy: .public)")
+            }
         }
     }
 

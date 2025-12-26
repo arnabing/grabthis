@@ -5,7 +5,7 @@ import Combine
 // MARK: - Constants (from boring.notch)
 
 private let shadowPadding: CGFloat = 20
-private let openNotchSize: CGSize = .init(width: 640, height: 190)
+private let openNotchSize: CGSize = .init(width: 640, height: 210)
 private let windowSize: CGSize = .init(width: openNotchSize.width, height: openNotchSize.height + shadowPadding)
 private let cornerRadiusInsets = (
     opened: (top: CGFloat(19), bottom: CGFloat(24)),
@@ -106,6 +106,14 @@ final class OverlayPanelController {
         // Review glow animation (runs after recording stops)
         @Published var reviewGlowRunning: Bool = false
 
+        // Expanded screenshot overlay
+        @Published var showingExpandedScreenshot: Bool = false
+
+        // Last session info (shown on idle hover)
+        @Published var lastTranscript: String = ""
+        @Published var lastAppName: String = ""
+        @Published var lastScreenshot: ScreenshotCaptureResult?
+
         var hasPhysicalNotch: Bool {
             guard let screen = NSScreen.main else { return false }
             return screen.safeAreaInsets.top > 0
@@ -116,14 +124,17 @@ final class OverlayPanelController {
         var onCopy: (() -> Void)?
         var onInsert: (() -> Void)?
         var onClose: (() -> Void)?
+        var onExpandScreenshot: (() -> Void)?
     }
 
     let model = Model()
 
     private var panel: GrabThisWindow?
     private var hostingController: NSHostingController<OverlayRootView>?
+    private var expandedScreenshotPanel: NSPanel?
     private var autoDismissWork: DispatchWorkItem?
     private var hoverCancellable: AnyCancellable?
+    private var escKeyMonitor: Any?
 
     var isOverlayKeyWindow: Bool { panel?.isKeyWindow ?? false }
 
@@ -145,6 +156,13 @@ final class OverlayPanelController {
             return  // Let animation handle the rest
         }
 
+        // Save last session info before clearing (for idle hover display)
+        if !model.transcript.isEmpty {
+            model.lastTranscript = model.transcript
+            model.lastAppName = model.appName
+            model.lastScreenshot = model.screenshot
+        }
+
         withAnimation(closeAnimation) {
             model.mode = .idleChip
         }
@@ -160,6 +178,10 @@ final class OverlayPanelController {
         model.appName = appName
         model.screenshot = screenshot
         model.transcript = transcript
+        // Clear last session info when starting new session
+        model.lastTranscript = ""
+        model.lastAppName = ""
+        model.lastScreenshot = nil
         withAnimation(openAnimation) {
             model.mode = .listening
         }
@@ -211,6 +233,75 @@ final class OverlayPanelController {
         }
         show()
         scheduleAutoDismiss(seconds: 3.0)
+    }
+
+    func showExpandedScreenshot() {
+        // Check both current screenshot and last screenshot (for idle/history mode)
+        let image = model.screenshot?.image ?? model.lastScreenshot?.image
+        guard let image, let screen = NSScreen.main else { return }
+
+        // Cancel auto-dismiss timer while viewing expanded screenshot
+        cancelAutoDismiss()
+
+        // Dismiss the existing expanded panel if any
+        dismissExpandedScreenshot()
+
+        // Create the expanded screenshot view
+        let expandedView = ExpandedScreenshotView(
+            image: image,
+            onDismiss: { [weak self] in
+                self?.dismissExpandedScreenshot()
+            }
+        )
+        let hosting = NSHostingController(rootView: expandedView)
+
+        // Create fullscreen panel
+        let screenFrame = screen.frame
+        let styleMask: NSWindow.StyleMask = [.borderless, .nonactivatingPanel]
+        let panel = NSPanel(
+            contentRect: screenFrame,
+            styleMask: styleMask,
+            backing: .buffered,
+            defer: false
+        )
+        panel.contentView = hosting.view
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = false
+        panel.level = .mainMenu + 10  // Above everything
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+
+        panel.setFrame(screenFrame, display: true)
+        panel.orderFrontRegardless()
+
+        expandedScreenshotPanel = panel
+        model.showingExpandedScreenshot = true
+
+        // Add ESC key monitor to dismiss expanded screenshot
+        escKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if event.keyCode == 53 {  // ESC key
+                self?.dismissExpandedScreenshot()
+                return nil  // Consume the event
+            }
+            return event
+        }
+    }
+
+    func dismissExpandedScreenshot() {
+        // Remove ESC key monitor
+        if let monitor = escKeyMonitor {
+            NSEvent.removeMonitor(monitor)
+            escKeyMonitor = nil
+        }
+
+        expandedScreenshotPanel?.orderOut(nil)
+        expandedScreenshotPanel = nil
+        model.showingExpandedScreenshot = false
+
+        // Re-schedule auto-dismiss if in review/response/error mode
+        if model.mode == .review || model.mode == .response || model.mode == .error {
+            scheduleAutoDismiss(seconds: 3.0)
+        }
     }
 }
 
@@ -452,7 +543,7 @@ private struct OverlayRootView: View {
             NotchHeader(
                 model: model,
                 statusColor: .cyan,
-                statusText: model.isHovering ? "Hold fn to talk" : "grabthis",
+                statusText: "Hold fn to talk",
                 showPulse: false,
                 showCloseButton: model.isOpen,
                 rightContent: { EmptyView() }
@@ -467,14 +558,14 @@ private struct OverlayRootView: View {
                     statusText: "Listening...",
                     showPulse: true,
                     showCloseButton: false,
-                    rightContent: { AudioBarVisualizer() }
+                    rightContent: { EmptyView() }
                 )
             }
         case .review:
             NotchHeader(
                 model: model,
                 statusColor: .green,
-                statusText: "Ready",
+                statusText: "Done. Press fn to talk again",
                 showPulse: false,
                 showCloseButton: true,
                 rightContent: { EmptyView() }
@@ -520,7 +611,7 @@ private struct OverlayRootView: View {
         case .hidden:
             EmptyView()
         case .idleChip:
-            IdleBodyContent()
+            IdleBodyContent(model: model)
         case .listening, .review:
             ActiveSessionBodyContent(model: model)
         case .processing:
@@ -591,57 +682,61 @@ private struct NotchHeader<RightContent: View>: View {
 
 // MARK: - Body Content Views (only shown when open)
 
-private struct IdleBodyContent: View {
-    var body: some View {
-        VStack(spacing: 12) {
-            Text("Press fn to start listening")
-                .font(.body)
-                .foregroundStyle(.white.opacity(0.7))
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Spacer()
-        }
-        .padding(.horizontal, 16)
-        .padding(.top, 8)
-        .padding(.bottom, 12)
-    }
-}
-
-private struct ActiveSessionBodyContent: View {
-    @ObservedObject var model: OverlayPanelController.Model
-
-    private var isListening: Bool { model.mode == .listening }
-    private var isReady: Bool { model.mode == .review }
+/// Shared component for transcript display with thumbnail and action buttons.
+/// Used by both idle hover (showing last session) and active review mode.
+private struct TranscriptActionsBody: View {
+    let transcript: String
+    let placeholderText: String
+    let screenshot: CGImage?
+    let showButtons: Bool
+    let onExpandScreenshot: (() -> Void)?
+    let onInsert: (() -> Void)?
+    let onCopy: (() -> Void)?
+    let onSend: (() -> Void)?
+    var onHover: ((Bool) -> Void)? = nil
 
     var body: some View {
         VStack(spacing: 12) {
-            // Transcript
-            if !model.transcript.isEmpty {
-                Text(model.transcript)
-                    .font(.body)
-                    .foregroundStyle(.white.opacity(0.9))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .lineLimit(4)
-            } else {
-                Text(isListening ? "Speak now..." : "No transcript")
-                    .font(.body)
-                    .foregroundStyle(.white.opacity(0.5))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentTransition(.interpolate)
+            // Top section: Transcript + thumbnail side by side
+            HStack(alignment: .top, spacing: 12) {
+                // Left: Transcript
+                if !transcript.isEmpty {
+                    Text(transcript)
+                        .font(.body)
+                        .foregroundStyle(.white.opacity(0.9))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .lineLimit(4)
+                } else {
+                    Text(placeholderText)
+                        .font(.body)
+                        .foregroundStyle(.white.opacity(0.5))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentTransition(.interpolate)
+                }
+
+                // Right: Screenshot thumbnail
+                if screenshot != nil {
+                    Button(action: { onExpandScreenshot?() }) {
+                        ReviewThumbnail(image: screenshot)
+                    }
+                    .buttonStyle(.plain)
+                    .transition(.opacity.combined(with: .scale(scale: 0.8)))
+                }
             }
 
             Spacer()
 
-            // Action buttons - fade in when ready
-            if isReady {
+            // Bottom section: Action buttons
+            if showButtons {
                 HStack(spacing: 12) {
-                    Button(action: { model.onInsert?() }) {
+                    Button(action: { onInsert?() }) {
                         Label("Insert", systemImage: "text.insert")
                             .font(.callout.weight(.medium))
                     }
                     .buttonStyle(.bordered)
                     .tint(.white.opacity(0.8))
 
-                    Button(action: { model.onCopy?() }) {
+                    Button(action: { onCopy?() }) {
                         Label("Copy", systemImage: "doc.on.doc")
                             .font(.callout.weight(.medium))
                     }
@@ -650,7 +745,7 @@ private struct ActiveSessionBodyContent: View {
 
                     Spacer()
 
-                    Button(action: { model.onSend?() }) {
+                    Button(action: { onSend?() }) {
                         Label("Send", systemImage: "paperplane.fill")
                             .font(.callout.weight(.medium))
                     }
@@ -663,8 +758,48 @@ private struct ActiveSessionBodyContent: View {
         .padding(.horizontal, 16)
         .padding(.top, 8)
         .padding(.bottom, 12)
+        .onHover { hovering in onHover?(hovering) }
+    }
+}
+
+private struct IdleBodyContent: View {
+    @ObservedObject var model: OverlayPanelController.Model
+
+    private var hasLastSession: Bool { !model.lastTranscript.isEmpty }
+
+    var body: some View {
+        TranscriptActionsBody(
+            transcript: model.lastTranscript,
+            placeholderText: "Hold fn to start talking",
+            screenshot: model.lastScreenshot?.image,
+            showButtons: hasLastSession,
+            onExpandScreenshot: model.onExpandScreenshot,
+            onInsert: model.onInsert,
+            onCopy: model.onCopy,
+            onSend: model.onSend
+        )
+    }
+}
+
+private struct ActiveSessionBodyContent: View {
+    @ObservedObject var model: OverlayPanelController.Model
+
+    private var isListening: Bool { model.mode == .listening }
+    private var isReady: Bool { model.mode == .review }
+
+    var body: some View {
+        TranscriptActionsBody(
+            transcript: model.transcript,
+            placeholderText: isListening ? "Speak now..." : "No transcript",
+            screenshot: isReady ? model.screenshot?.image : nil,
+            showButtons: isReady,
+            onExpandScreenshot: model.onExpandScreenshot,
+            onInsert: model.onInsert,
+            onCopy: model.onCopy,
+            onSend: model.onSend,
+            onHover: { model.isHovering = $0 }
+        )
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: model.mode)
-        .onHover { model.isHovering = $0 }
     }
 }
 
@@ -747,13 +882,9 @@ private struct ListeningSplitContent: View {
                 .fill(.black)
                 .frame(width: model.closedNotchSize.width)
 
-            // RIGHT: Expands to right screen edge
-            HStack {
-                AudioBarVisualizer()
-                    .padding(.leading, 8)
-                Spacer()
-            }
-            .frame(maxWidth: .infinity)  // Expand to fill right of notch
+            // RIGHT: Expands to right screen edge (empty for symmetry)
+            Spacer()
+                .frame(maxWidth: .infinity)
         }
         .frame(height: model.closedNotchSize.height)
         .animation(.spring(response: 0.30, dampingFraction: 0.78), value: model.audioLevel)
@@ -761,32 +892,6 @@ private struct ListeningSplitContent: View {
 }
 
 // MARK: - Supporting Views
-
-// MARK: - Audio Bar Visualizer (boring.notch style)
-
-private struct AudioBarVisualizer: View {
-    let barCount = 4
-    @State private var scales: [CGFloat] = [0.5, 0.7, 0.4, 0.6]
-
-    let timer = Timer.publish(every: 0.3, on: .main, in: .common).autoconnect()
-
-    var body: some View {
-        HStack(spacing: 2) {
-            ForEach(0..<barCount, id: \.self) { index in
-                RoundedRectangle(cornerRadius: 1.5)
-                    .fill(Color.cyan.opacity(0.9))
-                    .frame(width: 3, height: 14)
-                    .scaleEffect(y: scales[index], anchor: .bottom)
-                    .animation(.easeInOut(duration: 0.25), value: scales[index])
-            }
-        }
-        .onReceive(timer) { _ in
-            for i in 0..<barCount {
-                scales[i] = CGFloat.random(in: 0.35...1.0)
-            }
-        }
-    }
-}
 
 private struct PillVisualizer: View {
     let level: Double
@@ -835,6 +940,84 @@ private struct Thumbnail: View {
                 ProgressView()
                     .controlSize(.small)
             }
+        }
+    }
+}
+
+// Larger thumbnail for review panel (right side)
+private struct ReviewThumbnail: View {
+    let image: CGImage?
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(.white.opacity(0.1))
+                .frame(width: 80, height: 100)
+
+            if let image {
+                Image(decorative: image, scale: 1.0)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 80, height: 100)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay(
+                        // Expand icon hint
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.white)
+                            .padding(4)
+                            .background(.black.opacity(0.5))
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                            .padding(4),
+                        alignment: .bottomTrailing
+                    )
+            } else {
+                ProgressView()
+                    .controlSize(.small)
+            }
+        }
+        .contentShape(Rectangle())
+    }
+}
+
+// Full-screen expanded screenshot view (shown in separate panel)
+struct ExpandedScreenshotView: View {
+    let image: CGImage
+    let onDismiss: () -> Void
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            // Semi-transparent backdrop
+            Color.black.opacity(0.85)
+                .ignoresSafeArea()
+
+            // Screenshot image
+            VStack(spacing: 16) {
+                Image(decorative: image, scale: 1.0)
+                    .resizable()
+                    .scaledToFit()
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .shadow(color: .black.opacity(0.5), radius: 20)
+                    .padding(40)
+
+                // Close hint
+                Text("Click anywhere or press ESC to close")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.6))
+            }
+
+            // Close button (top-right)
+            Button(action: onDismiss) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.title)
+                    .foregroundStyle(.white.opacity(0.8))
+            }
+            .buttonStyle(.plain)
+            .padding(24)
+        }
+        .contentShape(Rectangle())  // Make entire area tappable
+        .onTapGesture {
+            onDismiss()
         }
     }
 }
