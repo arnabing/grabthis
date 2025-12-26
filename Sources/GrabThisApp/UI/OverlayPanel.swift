@@ -99,6 +99,10 @@ final class OverlayPanelController {
         @Published var isOpen: Bool = false  // Now a stored property
         @Published var closedNotchSize: CGSize = getClosedNotchSize()
 
+        // First launch hello animation (from boring.notch)
+        @AppStorage("hasShownFirstHint") var hasShownFirstHint: Bool = false
+        @Published var helloAnimationRunning: Bool = false
+
         var hasPhysicalNotch: Bool {
             guard let screen = NSScreen.main else { return false }
             return screen.safeAreaInsets.top > 0
@@ -128,6 +132,17 @@ final class OverlayPanelController {
     }
 
     func presentIdleChip() {
+        // First launch: trigger hello animation (from boring.notch)
+        if !model.hasShownFirstHint && !model.helloAnimationRunning {
+            model.helloAnimationRunning = true
+            model.mode = .idleChip
+            withAnimation(openAnimation) {
+                model.isOpen = true
+            }
+            show()
+            return  // Let animation handle the rest
+        }
+
         withAnimation(closeAnimation) {
             model.mode = .idleChip
         }
@@ -372,19 +387,34 @@ private struct OverlayRootView: View {
         // boring.notch pattern: header is ALWAYS present, body is ADDED when open
         // This ensures transitions fire correctly on every open/close cycle
         VStack(alignment: .leading, spacing: 0) {
-            // HEADER - always present, content varies by state
-            headerContent
-                .zIndex(2)
+            if model.helloAnimationRunning {
+                // First launch: show glowing snake animation (from boring.notch)
+                Spacer()
+                HelloAnimation(onFinish: {
+                    model.helloAnimationRunning = false
+                    model.hasShownFirstHint = true
+                    withAnimation(closeAnimation) {
+                        model.isOpen = false
+                    }
+                })
+                .frame(width: model.closedNotchSize.width, height: 80)
+                .padding(.top, 40)
+                Spacer()
+            } else {
+                // HEADER - always present, content varies by state
+                headerContent
+                    .zIndex(2)
 
-            // BODY - only when open, this gets the transition
-            if model.isOpen {
-                bodyContent
-                    .transition(
-                        .scale(scale: 0.8, anchor: .top)
-                        .combined(with: .opacity)
-                        .animation(.smooth(duration: 0.35))
-                    )
-                    .zIndex(1)
+                // BODY - only when open, this gets the transition
+                if model.isOpen {
+                    bodyContent
+                        .transition(
+                            .scale(scale: 0.8, anchor: .top)
+                            .combined(with: .opacity)
+                            .animation(.smooth(duration: 0.35))
+                        )
+                        .zIndex(1)
+                }
             }
         }
     }
