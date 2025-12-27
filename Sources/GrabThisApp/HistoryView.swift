@@ -11,6 +11,15 @@ struct HistoryView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
                             Text(r.appName).font(.headline)
+                            // Show turn count badge for multi-turn conversations
+                            if r.turns.count > 2 {
+                                Text("\(r.turns.count / 2) turns")
+                                    .font(.caption2)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(.cyan.opacity(0.2))
+                                    .clipShape(Capsule())
+                            }
                             Spacer()
                             Text(r.endedAt, style: .time)
                                 .font(.caption)
@@ -54,10 +63,45 @@ struct HistoryView: View {
                     ScreenshotPreview(path: path)
                 }
 
-                ScrollView {
-                    Text(record.transcript)
-                        .textSelection(.enabled)
+                // Show conversation history
+                if !record.turns.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Conversation")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text("\(record.turns.count) messages")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        }
+                        ConversationView(turns: record.turns)
+                    }
+                } else {
+                    // Fallback for legacy sessions without turns
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 12) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("You asked:")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                Text(record.transcript)
+                                    .textSelection(.enabled)
+                            }
+
+                            if let response = record.aiResponse, !response.isEmpty {
+                                Divider()
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("AI response:")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.secondary)
+                                    Text(markdownAttributedString(response))
+                                        .textSelection(.enabled)
+                                }
+                            }
+                        }
                         .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
 
                 HStack {
@@ -85,6 +129,45 @@ struct HistoryView: View {
     private func copy(_ text: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    /// Convert block-level markdown to inline formatting for SwiftUI Text
+    private func preprocessMarkdown(_ text: String) -> String {
+        var lines = text.components(separatedBy: "\n")
+        for i in lines.indices {
+            var line = lines[i]
+            // Headers → bold
+            if line.hasPrefix("### ") {
+                line = "**" + line.dropFirst(4) + "**"
+            } else if line.hasPrefix("## ") {
+                line = "**" + line.dropFirst(3) + "**"
+            } else if line.hasPrefix("# ") {
+                line = "**" + line.dropFirst(2) + "**"
+            }
+            // List items → bullet
+            if line.hasPrefix("- ") {
+                line = "• " + line.dropFirst(2)
+            } else if line.hasPrefix("* ") {
+                line = "• " + line.dropFirst(2)
+            }
+            lines[i] = line
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func markdownAttributedString(_ text: String) -> AttributedString {
+        let processed = preprocessMarkdown(text)
+        var result = (try? AttributedString(markdown: processed, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
+
+        // Style links in cyan for visibility
+        for run in result.runs {
+            if run.link != nil {
+                let range = run.range
+                result[range].foregroundColor = .cyan
+            }
+        }
+
+        return result
     }
 }
 

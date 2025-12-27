@@ -53,8 +53,13 @@ enum CaptureService {
     @MainActor
     static func captureActiveWindow() async throws -> ScreenshotCaptureResult {
         guard let frontmost = NSWorkspace.shared.frontmostApplication else { throw CaptureError.noFrontmostApp }
-        let pid = frontmost.processIdentifier
+        return try await captureWindow(forPID: frontmost.processIdentifier)
+    }
 
+    /// Capture window for a specific app by PID.
+    /// Use this when you've already captured the target app's PID to avoid race conditions.
+    @MainActor
+    static func captureWindow(forPID pid: pid_t) async throws -> ScreenshotCaptureResult {
         let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
         let candidates = content.windows.filter { w in
             guard let owning = w.owningApplication else { return false }

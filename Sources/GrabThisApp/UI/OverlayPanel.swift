@@ -6,7 +6,8 @@ import Combine
 
 private let shadowPadding: CGFloat = 20
 private let openNotchSize: CGSize = .init(width: 640, height: 210)
-private let windowSize: CGSize = .init(width: openNotchSize.width, height: openNotchSize.height + shadowPadding)
+private let chatNotchSize: CGSize = .init(width: 640, height: 350)  // Taller for chat mode
+private let windowSize: CGSize = .init(width: openNotchSize.width, height: chatNotchSize.height + shadowPadding)
 private let cornerRadiusInsets = (
     opened: (top: CGFloat(19), bottom: CGFloat(24)),
     closed: (top: CGFloat(6), bottom: CGFloat(14))
@@ -40,6 +41,9 @@ private func getClosedNotchSize(screen: NSScreen? = nil) -> CGSize {
 // MARK: - Custom Window (from boring.notch)
 
 private class GrabThisWindow: NSPanel {
+    /// Set to true when the window should accept keyboard input (e.g., chat mode)
+    var allowsKeyboardInput: Bool = false
+
     override init(contentRect: NSRect, styleMask: NSWindow.StyleMask, backing: NSWindow.BackingStoreType, defer flag: Bool) {
         super.init(contentRect: contentRect, styleMask: styleMask, backing: backing, defer: flag)
 
@@ -57,7 +61,7 @@ private class GrabThisWindow: NSPanel {
         appearance = NSAppearance(named: .darkAqua)
     }
 
-    override var canBecomeKey: Bool { false }
+    override var canBecomeKey: Bool { allowsKeyboardInput }
     override var canBecomeMain: Bool { false }
 }
 
@@ -113,6 +117,10 @@ final class OverlayPanelController {
         @Published var lastTranscript: String = ""
         @Published var lastAppName: String = ""
         @Published var lastScreenshot: ScreenshotCaptureResult?
+        @Published var lastAIResponse: String?
+
+        // Multi-turn conversation state
+        @Published var conversationTurns: [ConversationTurn] = []
 
         var hasPhysicalNotch: Bool {
             guard let screen = NSScreen.main else { return false }
@@ -125,6 +133,14 @@ final class OverlayPanelController {
         var onInsert: (() -> Void)?
         var onClose: (() -> Void)?
         var onExpandScreenshot: (() -> Void)?
+        var onFollowUp: (() -> Void)?
+        var onTextFollowUp: ((String) -> Void)?
+        var onRemoveScreenshot: (() -> Void)?
+        var onTranscriptEdit: ((String) -> Void)?
+
+        // Chat input state (for live transcription in text field)
+        @Published var followUpInputText: String = ""
+        @Published var isRecordingFollowUp: Bool = false
     }
 
     let model = Model()
@@ -161,6 +177,7 @@ final class OverlayPanelController {
             model.lastTranscript = model.transcript
             model.lastAppName = model.appName
             model.lastScreenshot = model.screenshot
+            model.lastAIResponse = model.responseText.isEmpty ? nil : model.responseText
         }
 
         withAnimation(closeAnimation) {
@@ -170,6 +187,11 @@ final class OverlayPanelController {
         model.screenshot = nil
         model.responseText = ""
         model.audioLevel = 0.0
+        model.followUpInputText = ""
+        model.isRecordingFollowUp = false
+        model.conversationTurns = []
+        // Disable keyboard input when not in chat mode
+        panel?.allowsKeyboardInput = false
         cancelAutoDismiss()
         show()
     }
@@ -182,6 +204,7 @@ final class OverlayPanelController {
         model.lastTranscript = ""
         model.lastAppName = ""
         model.lastScreenshot = nil
+        model.lastAIResponse = nil
         withAnimation(openAnimation) {
             model.mode = .listening
         }
@@ -202,6 +225,8 @@ final class OverlayPanelController {
         withAnimation(openAnimation) {
             model.mode = .review
         }
+        // Enable keyboard input for transcript editing
+        panel?.allowsKeyboardInput = true
         show()
         scheduleAutoDismiss(seconds: 3.0)
     }
@@ -222,8 +247,20 @@ final class OverlayPanelController {
         withAnimation(openAnimation) {
             model.mode = .response
         }
+        // Enable keyboard input for chat text field
+        panel?.allowsKeyboardInput = true
         show()
-        scheduleAutoDismiss(seconds: 3.0)
+        // Auto-dismiss (retract) after 3s - hover will bring it back with full chat
+        scheduleResponseRetract(seconds: 3.0)
+    }
+
+    /// Retract response mode (close visually but keep conversation state for hover)
+    func retractResponse() {
+        withAnimation(closeAnimation) {
+            model.isOpen = false
+        }
+        // Keep mode as .response so hover shows chat, just disable keyboard while retracted
+        panel?.allowsKeyboardInput = false
     }
 
     func presentError(_ message: String) {
@@ -298,8 +335,8 @@ final class OverlayPanelController {
         expandedScreenshotPanel = nil
         model.showingExpandedScreenshot = false
 
-        // Re-schedule auto-dismiss if in review/response/error mode
-        if model.mode == .review || model.mode == .response || model.mode == .error {
+        // Re-schedule auto-dismiss for review/error modes (not response - stays visible)
+        if model.mode == .review || model.mode == .error {
             scheduleAutoDismiss(seconds: 3.0)
         }
     }
@@ -325,13 +362,20 @@ private extension OverlayPanelController {
             self.hostingController = hosting
             self.panel = p
 
-            // Cancel auto-dismiss while hovering
+            // Cancel auto-dismiss while hovering, re-enable keyboard for response mode
             hoverCancellable = model.$isHovering.sink { [weak self] hovering in
                 guard let self else { return }
                 if hovering {
                     self.cancelAutoDismiss()
-                } else if self.model.mode == .review || self.model.mode == .response || self.model.mode == .error {
+                    // Re-enable keyboard when hovering expands response mode
+                    if self.model.mode == .response {
+                        self.panel?.allowsKeyboardInput = true
+                    }
+                } else if self.model.mode == .review || self.model.mode == .error {
                     self.scheduleAutoDismiss(seconds: 3.0)
+                } else if self.model.mode == .response {
+                    // Response mode: retract (but keep state) when hover ends
+                    self.scheduleResponseRetract(seconds: 2.0)
                 }
             }
         }
@@ -376,6 +420,21 @@ private extension OverlayPanelController {
             Task { @MainActor in
                 guard let self else { return }
                 self.presentIdleChip()
+            }
+        }
+        autoDismissWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
+    }
+
+    /// Auto-retract for response mode (keeps conversation state, hover brings it back)
+    func scheduleResponseRetract(seconds: TimeInterval) {
+        cancelAutoDismiss()
+        let work = DispatchWorkItem { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                // Only retract if still in response mode and not hovering
+                guard self.model.mode == .response, !self.model.isHovering else { return }
+                self.retractResponse()
             }
         }
         autoDismissWork = work
@@ -457,7 +516,10 @@ private struct OverlayRootView: View {
                     }
                     .shadow(color: (model.isOpen || model.isHovering) ? .black.opacity(0.7) : .clear, radius: 6)
                     // Use explicit closed height instead of nil - nil might not animate properly
-                    .frame(height: model.isOpen ? openNotchSize.height : model.closedNotchSize.height)
+                    // Use taller height for chat mode (response/error)
+                    .frame(height: model.isOpen
+                        ? (model.mode == .response || model.mode == .error ? chatNotchSize.height : openNotchSize.height)
+                        : model.closedNotchSize.height)
                     // Animate for BOTH mode changes AND direct isOpen changes (hover)
                     // boring.notch uses notchState for mode-triggered animations
                     .animation(model.isOpen ? openAnimation : closeAnimation, value: model.mode)
@@ -617,7 +679,7 @@ private struct OverlayRootView: View {
         case .processing:
             ProcessingBodyContent()
         case .response:
-            ResponseBodyContent(model: model, isError: false)
+            ChatResponseView(model: model)  // Chat UI with text input + mic
         case .error:
             ResponseBodyContent(model: model, isError: true)
         }
@@ -685,39 +747,64 @@ private struct NotchHeader<RightContent: View>: View {
 /// Shared component for transcript display with thumbnail and action buttons.
 /// Used by both idle hover (showing last session) and active review mode.
 private struct TranscriptActionsBody: View {
-    let transcript: String
+    @Binding var transcript: String
     let placeholderText: String
     let screenshot: CGImage?
     let showButtons: Bool
+    let isEditable: Bool
     let onExpandScreenshot: (() -> Void)?
+    let onRemoveScreenshot: (() -> Void)?
     let onInsert: (() -> Void)?
     let onCopy: (() -> Void)?
     let onSend: (() -> Void)?
     var onHover: ((Bool) -> Void)? = nil
+    var aiResponse: String? = nil  // Optional AI response for idle hover
 
     var body: some View {
         VStack(spacing: 12) {
             // Top section: Transcript + thumbnail side by side
             HStack(alignment: .top, spacing: 12) {
-                // Left: Transcript
-                if !transcript.isEmpty {
-                    Text(transcript)
-                        .font(.body)
-                        .foregroundStyle(.white.opacity(0.9))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .lineLimit(4)
-                } else {
-                    Text(placeholderText)
-                        .font(.body)
-                        .foregroundStyle(.white.opacity(0.5))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentTransition(.interpolate)
+                // Left: Transcript (editable in review mode)
+                VStack(alignment: .leading, spacing: 8) {
+                    if isEditable {
+                        // Editable text field for review mode
+                        TextEditor(text: $transcript)
+                            .font(.body)
+                            .foregroundStyle(.white.opacity(0.9))
+                            .scrollContentBackground(.hidden)
+                            .background(Color.white.opacity(0.05))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .frame(minHeight: 60, maxHeight: 100)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(Color.white.opacity(0.15), lineWidth: 1)
+                            )
+                    } else if !transcript.isEmpty {
+                        Text(transcript)
+                            .font(.body)
+                            .foregroundStyle(.white.opacity(0.9))
+                            .lineLimit(aiResponse != nil ? 2 : 4)
+                    } else {
+                        Text(placeholderText)
+                            .font(.body)
+                            .foregroundStyle(.white.opacity(0.5))
+                            .contentTransition(.interpolate)
+                    }
+
+                    // Show AI response if available (for idle hover)
+                    if let response = aiResponse, !response.isEmpty {
+                        Text(response)
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.6))
+                            .lineLimit(2)
+                    }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
 
                 // Right: Screenshot thumbnail
                 if screenshot != nil {
                     Button(action: { onExpandScreenshot?() }) {
-                        ReviewThumbnail(image: screenshot)
+                        ReviewThumbnail(image: screenshot, onRemove: onRemoveScreenshot)
                     }
                     .buttonStyle(.plain)
                     .transition(.opacity.combined(with: .scale(scale: 0.8)))
@@ -729,13 +816,6 @@ private struct TranscriptActionsBody: View {
             // Bottom section: Action buttons
             if showButtons {
                 HStack(spacing: 12) {
-                    Button(action: { onInsert?() }) {
-                        Label("Insert", systemImage: "text.insert")
-                            .font(.callout.weight(.medium))
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(.white.opacity(0.8))
-
                     Button(action: { onCopy?() }) {
                         Label("Copy", systemImage: "doc.on.doc")
                             .font(.callout.weight(.medium))
@@ -745,8 +825,9 @@ private struct TranscriptActionsBody: View {
 
                     Spacer()
 
+                    // Send to AI button
                     Button(action: { onSend?() }) {
-                        Label("Send", systemImage: "paperplane.fill")
+                        Label("Ask AI", systemImage: "arrow.up.circle.fill")
                             .font(.callout.weight(.medium))
                     }
                     .buttonStyle(.borderedProminent)
@@ -769,14 +850,17 @@ private struct IdleBodyContent: View {
 
     var body: some View {
         TranscriptActionsBody(
-            transcript: model.lastTranscript,
+            transcript: .constant(model.lastTranscript),  // Read-only for history
             placeholderText: "Hold fn to start talking",
             screenshot: model.lastScreenshot?.image,
             showButtons: hasLastSession,
+            isEditable: false,
             onExpandScreenshot: model.onExpandScreenshot,
+            onRemoveScreenshot: nil,  // Don't allow removing from history view
             onInsert: model.onInsert,
             onCopy: model.onCopy,
-            onSend: model.onSend
+            onSend: model.onSend,
+            aiResponse: model.lastAIResponse
         )
     }
 }
@@ -789,11 +873,19 @@ private struct ActiveSessionBodyContent: View {
 
     var body: some View {
         TranscriptActionsBody(
-            transcript: model.transcript,
+            transcript: Binding(
+                get: { model.transcript },
+                set: { newValue in
+                    model.transcript = newValue
+                    model.onTranscriptEdit?(newValue)
+                }
+            ),
             placeholderText: isListening ? "Speak now..." : "No transcript",
             screenshot: isReady ? model.screenshot?.image : nil,
             showButtons: isReady,
+            isEditable: isReady,  // Editable only in review mode
             onExpandScreenshot: model.onExpandScreenshot,
+            onRemoveScreenshot: model.onRemoveScreenshot,
             onInsert: model.onInsert,
             onCopy: model.onCopy,
             onSend: model.onSend,
@@ -804,11 +896,28 @@ private struct ActiveSessionBodyContent: View {
 }
 
 private struct ProcessingBodyContent: View {
+    private static let funMessages = [
+        "Summoning the AI spirits...",
+        "Consulting the digital oracle...",
+        "Crunching pixels...",
+        "Teaching robots to see...",
+        "Spinning up neural hamsters...",
+        "Asking the cloud nicely...",
+        "Decoding your brilliance...",
+        "Waking up the AI...",
+        "Processing at light speed...",
+        "Reading the screen tea leaves...",
+        "Thinking really hard...",
+        "Analyzing with gusto...",
+    ]
+
+    @State private var message = funMessages.randomElement() ?? "Processing..."
+
     var body: some View {
         VStack(spacing: 12) {
-            Text("Preparing your request")
+            Text(message)
                 .font(.body)
-                .foregroundStyle(.white.opacity(0.5))
+                .foregroundStyle(.white.opacity(0.6))
                 .frame(maxWidth: .infinity, alignment: .leading)
             Spacer()
         }
@@ -822,14 +931,25 @@ private struct ResponseBodyContent: View {
     @ObservedObject var model: OverlayPanelController.Model
     let isError: Bool
 
+    private var hasMultipleTurns: Bool { model.conversationTurns.count > 1 }
+
     var body: some View {
-        VStack(spacing: 12) {
-            // Response text
-            Text(model.responseText)
-                .font(.body)
-                .foregroundStyle(.white.opacity(0.9))
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .lineLimit(4)
+        VStack(spacing: 8) {
+            // Show conversation turns if available, otherwise just response text
+            if !model.conversationTurns.isEmpty && !isError {
+                ConversationView(
+                    turns: model.conversationTurns,
+                    compact: true,
+                    maxHeight: 120
+                )
+            } else {
+                // Fallback for errors or single response
+                Text(model.responseText)
+                    .font(.body)
+                    .foregroundStyle(.white.opacity(0.9))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .lineLimit(4)
+            }
 
             Spacer()
 
@@ -843,12 +963,135 @@ private struct ResponseBodyContent: View {
                 .tint(.white.opacity(0.8))
 
                 Spacer()
+
+                // Follow-up button (only for non-error responses)
+                if !isError {
+                    Button(action: { model.onFollowUp?() }) {
+                        Label("Follow up", systemImage: "text.bubble")
+                            .font(.callout.weight(.medium))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.cyan)
+                }
             }
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
         .padding(.bottom, 12)
         .onHover { model.isHovering = $0 }
+    }
+}
+
+/// Chat-style response view with scrollable conversation and input field
+private struct ChatResponseView: View {
+    @ObservedObject var model: OverlayPanelController.Model
+    @FocusState private var isInputFocused: Bool
+
+    private var hasTextInput: Bool {
+        !model.followUpInputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Scrollable chat bubbles (takes all available space)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 10) {
+                        // Screenshot - right aligned above first user message
+                        if let image = model.screenshot?.image {
+                            HStack {
+                                Spacer()
+                                VStack(alignment: .trailing, spacing: 4) {
+                                    Text("Screenshot")
+                                        .font(.caption)
+                                        .foregroundStyle(.white.opacity(0.5))
+                                    Button(action: { model.onExpandScreenshot?() }) {
+                                        Image(decorative: image, scale: 1.0)
+                                            .resizable()
+                                            .scaledToFill()
+                                            .frame(width: 100, height: 60)
+                                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 8)
+                                                    .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                                            )
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            .padding(.bottom, 4)
+                        }
+
+                        // Conversation turns
+                        ForEach(Array(model.conversationTurns.enumerated()), id: \.offset) { idx, turn in
+                            ChatBubbleView(role: turn.role, content: turn.content, timestamp: nil, compact: true)
+                                .id(idx)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                }
+                .onChange(of: model.conversationTurns.count) { _, _ in
+                    if let last = model.conversationTurns.indices.last {
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            proxy.scrollTo(last, anchor: .bottom)
+                        }
+                    }
+                }
+            }
+
+            Divider().background(Color.white.opacity(0.2))
+
+            // Input area with text field + send/mic buttons
+            HStack(spacing: 10) {
+                TextField("Ask a follow-up...", text: $model.followUpInputText)
+                    .textFieldStyle(.plain)
+                    .font(.callout)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.white.opacity(0.1))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .focused($isInputFocused)
+                    .onSubmit { sendTextFollowUp() }
+
+                // Send button (shows when text field has content)
+                if hasTextInput {
+                    Button(action: { sendTextFollowUp() }) {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.title2)
+                            .foregroundStyle(.cyan)
+                            .frame(width: 36, height: 36)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Send message")
+                    .transition(.scale.combined(with: .opacity))
+                }
+
+                // Mic button (hold or tap to record)
+                Button(action: { model.onFollowUp?() }) {
+                    Image(systemName: model.isRecordingFollowUp ? "mic.fill" : "mic")
+                        .font(.title3)
+                        .foregroundStyle(model.isRecordingFollowUp ? .red : .cyan)
+                        .frame(width: 36, height: 36)
+                        .background(model.isRecordingFollowUp ? Color.red.opacity(0.2) : Color.white.opacity(0.1))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Tap or hold fn to speak")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .animation(.easeOut(duration: 0.15), value: hasTextInput)
+        }
+        .onHover { model.isHovering = $0 }
+    }
+
+    private func sendTextFollowUp() {
+        let text = model.followUpInputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        model.onTextFollowUp?(text)
+        model.followUpInputText = ""
     }
 }
 
@@ -947,6 +1190,7 @@ private struct Thumbnail: View {
 // Larger thumbnail for review panel (right side)
 private struct ReviewThumbnail: View {
     let image: CGImage?
+    var onRemove: (() -> Void)? = nil
 
     var body: some View {
         ZStack {
@@ -971,12 +1215,202 @@ private struct ReviewThumbnail: View {
                             .padding(4),
                         alignment: .bottomTrailing
                     )
+                    .overlay(alignment: .topTrailing) {
+                        // X button to remove screenshot
+                        if onRemove != nil {
+                            Button(action: { onRemove?() }) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 18))
+                                    .foregroundStyle(.white, .black.opacity(0.6))
+                                    .shadow(radius: 2)
+                            }
+                            .buttonStyle(.plain)
+                            .offset(x: 6, y: -6)
+                        }
+                    }
             } else {
                 ProgressView()
                     .controlSize(.small)
             }
         }
         .contentShape(Rectangle())
+    }
+}
+
+// MARK: - Chat UI Components
+
+/// Animated typing indicator (iMessage-style bouncing dots)
+private struct TypingIndicator: View {
+    @State private var phase: CGFloat = 0
+
+    var body: some View {
+        HStack(spacing: 5) {
+            ForEach(0..<3) { index in
+                Circle()
+                    .fill(Color.white.opacity(0.6))
+                    .frame(width: 8, height: 8)
+                    .offset(y: bounceOffset(for: index))
+            }
+        }
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.6).repeatForever(autoreverses: false)) {
+                phase = 1
+            }
+        }
+    }
+
+    private func bounceOffset(for index: Int) -> CGFloat {
+        // Stagger the animation for each dot
+        let delay = Double(index) * 0.15
+        let progress = (phase + delay).truncatingRemainder(dividingBy: 1.0)
+
+        // Bounce curve: quick up, slower down
+        if progress < 0.5 {
+            return -6 * sin(progress * .pi)
+        } else {
+            return 0
+        }
+    }
+}
+
+/// Helper view for rendering markdown text with clickable links
+private struct MarkdownText: View {
+    let content: String
+    var font: Font = .body
+    var color: Color = .white.opacity(0.95)
+    var linkColor: Color = .cyan
+
+    var body: some View {
+        Text(attributedContent)
+            .font(font)
+            .tint(linkColor)  // Makes links this color and clickable
+    }
+
+    private var attributedContent: AttributedString {
+        let processed = preprocessMarkdown(content)
+        var result = (try? AttributedString(markdown: processed, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(content)
+
+        // Apply base color to all text, but links will use tint color
+        for run in result.runs {
+            // Only apply foreground color to non-link runs
+            if run.link == nil {
+                let range = run.range
+                result[range].foregroundColor = color
+            }
+        }
+
+        return result
+    }
+
+    /// Convert block-level markdown (headers, lists) to inline formatting that SwiftUI Text can render
+    private func preprocessMarkdown(_ text: String) -> String {
+        var lines = text.components(separatedBy: "\n")
+
+        for i in lines.indices {
+            var line = lines[i]
+
+            // Convert headers to bold: ### Header → **Header**
+            if line.hasPrefix("### ") {
+                line = "**" + line.dropFirst(4) + "**"
+            } else if line.hasPrefix("## ") {
+                line = "**" + line.dropFirst(3) + "**"
+            } else if line.hasPrefix("# ") {
+                line = "**" + line.dropFirst(2) + "**"
+            }
+
+            // Convert unordered list items: - item → • item
+            if line.hasPrefix("- ") {
+                line = "• " + line.dropFirst(2)
+            } else if line.hasPrefix("* ") {
+                line = "• " + line.dropFirst(2)
+            }
+
+            // Convert numbered lists: 1. item → 1. item (keep as-is, they render fine)
+
+            lines[i] = line
+        }
+
+        return lines.joined(separator: "\n")
+    }
+}
+
+/// Individual message bubble for conversation display
+struct ChatBubbleView: View {
+    let role: ConversationTurn.Role
+    let content: String
+    let timestamp: Date?
+    var compact: Bool = false  // For inline display in response mode
+
+    private var isUser: Bool { role == .user }
+    private var isTypingPlaceholder: Bool { content == "..." && !isUser }
+
+    var body: some View {
+        HStack {
+            if isUser { Spacer(minLength: compact ? 20 : 40) }
+
+            VStack(alignment: isUser ? .trailing : .leading, spacing: 4) {
+                Group {
+                    if isTypingPlaceholder {
+                        // Animated typing indicator
+                        TypingIndicator()
+                            .frame(height: compact ? 20 : 24)
+                    } else {
+                        MarkdownText(content: content, font: compact ? .callout : .body)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(isUser ? Color.cyan.opacity(0.3) : Color.white.opacity(0.1))
+                )
+                .textSelection(.enabled)
+
+                if let timestamp, !compact {
+                    Text(timestamp, style: .time)
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.4))
+                }
+            }
+
+            if !isUser { Spacer(minLength: compact ? 20 : 40) }
+        }
+    }
+}
+
+/// Scrollable conversation view for multi-turn display
+struct ConversationView: View {
+    let turns: [ConversationTurn]
+    var compact: Bool = false  // For inline display in response mode
+    var maxHeight: CGFloat? = nil
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: compact ? 8 : 12) {
+                    ForEach(Array(turns.enumerated()), id: \.offset) { index, turn in
+                        ChatBubbleView(
+                            role: turn.role,
+                            content: turn.content,
+                            timestamp: compact ? nil : turn.timestamp,
+                            compact: compact
+                        )
+                        .id(index)
+                    }
+                }
+                .padding(.horizontal, compact ? 0 : 4)
+                .padding(.vertical, compact ? 4 : 8)
+            }
+            .frame(maxHeight: maxHeight)
+            .onChange(of: turns.count) { _, _ in
+                // Auto-scroll to latest message
+                if let lastIndex = turns.indices.last {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        proxy.scrollTo(lastIndex, anchor: .bottom)
+                    }
+                }
+            }
+        }
     }
 }
 

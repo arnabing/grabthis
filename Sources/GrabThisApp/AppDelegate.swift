@@ -46,6 +46,10 @@ private extension AppDelegate {
             overlay.model.onCopy = { [weak self] in self?.sessionController.copyTranscript() }
             overlay.model.onInsert = { [weak self] in self?.sessionController.insertTranscript() }
             overlay.model.onExpandScreenshot = { [weak self] in self?.overlay.showExpandedScreenshot() }
+            overlay.model.onFollowUp = { [weak self] in self?.sessionController.beginFollowUp() }
+            overlay.model.onTextFollowUp = { [weak self] text in self?.sessionController.sendTextFollowUp(text) }
+            overlay.model.onRemoveScreenshot = { [weak self] in self?.sessionController.removeScreenshot() }
+            overlay.model.onTranscriptEdit = { [weak self] text in self?.sessionController.updateTranscript(text) }
             sessionController.begin()
         case .processing:
             sessionController.end()

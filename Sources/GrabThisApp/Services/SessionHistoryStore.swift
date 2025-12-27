@@ -1,7 +1,19 @@
 import AppKit
 import Foundation
 
-struct SessionRecord: Codable, Identifiable, Equatable {
+/// A single message in a conversation (user question or AI response)
+struct ConversationTurn: Codable, Equatable {
+    enum Role: String, Codable {
+        case user
+        case assistant
+    }
+
+    let role: Role
+    let content: String
+    let timestamp: Date
+}
+
+struct SessionRecord: Identifiable, Equatable {
     enum EndReason: String, Codable {
         case completed
         case cancelled
@@ -10,15 +22,115 @@ struct SessionRecord: Codable, Identifiable, Equatable {
 
     let id: UUID
     let startedAt: Date
-    let endedAt: Date
-    let endReason: EndReason
+    var endedAt: Date
+    var endReason: EndReason
 
     let appName: String
     let bundleIdentifier: String?
     let targetPID: Int?
 
-    let transcript: String
     let screenshotPath: String?
+
+    /// All conversation turns (user questions + AI responses)
+    var turns: [ConversationTurn]
+
+    // MARK: - Computed Properties for Backward Compatibility
+
+    /// First user message (for list preview)
+    var transcript: String {
+        turns.first(where: { $0.role == .user })?.content ?? ""
+    }
+
+    /// Last AI response (for quick access)
+    var aiResponse: String? {
+        turns.last(where: { $0.role == .assistant })?.content
+    }
+
+    // MARK: - Initialization
+
+    init(
+        id: UUID,
+        startedAt: Date,
+        endedAt: Date,
+        endReason: EndReason,
+        appName: String,
+        bundleIdentifier: String?,
+        targetPID: Int?,
+        transcript: String,
+        screenshotPath: String?
+    ) {
+        self.id = id
+        self.startedAt = startedAt
+        self.endedAt = endedAt
+        self.endReason = endReason
+        self.appName = appName
+        self.bundleIdentifier = bundleIdentifier
+        self.targetPID = targetPID
+        self.screenshotPath = screenshotPath
+
+        // Initialize with first user turn if transcript provided
+        if !transcript.isEmpty {
+            self.turns = [ConversationTurn(role: .user, content: transcript, timestamp: startedAt)]
+        } else {
+            self.turns = []
+        }
+    }
+}
+
+// MARK: - Codable with Migration Support
+
+extension SessionRecord: Codable {
+    enum CodingKeys: String, CodingKey {
+        case id, startedAt, endedAt, endReason
+        case appName, bundleIdentifier, targetPID
+        case screenshotPath, turns
+        // Legacy keys for migration
+        case transcript, aiResponse
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        id = try container.decode(UUID.self, forKey: .id)
+        startedAt = try container.decode(Date.self, forKey: .startedAt)
+        endedAt = try container.decode(Date.self, forKey: .endedAt)
+        endReason = try container.decode(EndReason.self, forKey: .endReason)
+        appName = try container.decode(String.self, forKey: .appName)
+        bundleIdentifier = try container.decodeIfPresent(String.self, forKey: .bundleIdentifier)
+        targetPID = try container.decodeIfPresent(Int.self, forKey: .targetPID)
+        screenshotPath = try container.decodeIfPresent(String.self, forKey: .screenshotPath)
+
+        // Try new format first, then migrate from legacy
+        if let decodedTurns = try container.decodeIfPresent([ConversationTurn].self, forKey: .turns) {
+            turns = decodedTurns
+        } else {
+            // Migrate from legacy format
+            var migrated: [ConversationTurn] = []
+            if let legacyTranscript = try container.decodeIfPresent(String.self, forKey: .transcript),
+               !legacyTranscript.isEmpty {
+                migrated.append(ConversationTurn(role: .user, content: legacyTranscript, timestamp: startedAt))
+            }
+            if let legacyResponse = try container.decodeIfPresent(String.self, forKey: .aiResponse),
+               !legacyResponse.isEmpty {
+                migrated.append(ConversationTurn(role: .assistant, content: legacyResponse, timestamp: endedAt))
+            }
+            turns = migrated
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+
+        try container.encode(id, forKey: .id)
+        try container.encode(startedAt, forKey: .startedAt)
+        try container.encode(endedAt, forKey: .endedAt)
+        try container.encode(endReason, forKey: .endReason)
+        try container.encode(appName, forKey: .appName)
+        try container.encodeIfPresent(bundleIdentifier, forKey: .bundleIdentifier)
+        try container.encodeIfPresent(targetPID, forKey: .targetPID)
+        try container.encodeIfPresent(screenshotPath, forKey: .screenshotPath)
+        try container.encode(turns, forKey: .turns)
+    }
 }
 
 @MainActor
@@ -67,6 +179,36 @@ final class SessionHistoryStore: ObservableObject {
         }
         records = []
         save()
+    }
+
+    /// Add an AI response turn to an existing session
+    func addResponse(sessionId: UUID, response: String) {
+        guard let idx = records.firstIndex(where: { $0.id == sessionId }) else { return }
+        let turn = ConversationTurn(role: .assistant, content: response, timestamp: Date())
+        records[idx].turns.append(turn)
+        records[idx].endedAt = Date()
+        save()
+        let turnCount = records[idx].turns.count
+        Log.session.info("history added AI response for id=\(sessionId.uuidString, privacy: .public) totalTurns=\(turnCount)")
+    }
+
+    /// Add a user follow-up turn to an existing session
+    func addFollowUp(sessionId: UUID, question: String) {
+        guard let idx = records.firstIndex(where: { $0.id == sessionId }) else { return }
+        let turn = ConversationTurn(role: .user, content: question, timestamp: Date())
+        records[idx].turns.append(turn)
+        save()
+        let turnCount = records[idx].turns.count
+        Log.session.info("history added follow-up for id=\(sessionId.uuidString, privacy: .public) totalTurns=\(turnCount)")
+    }
+
+    /// Replace all turns for a session (for full conversation updates)
+    func updateTurns(sessionId: UUID, turns: [ConversationTurn]) {
+        guard let idx = records.firstIndex(where: { $0.id == sessionId }) else { return }
+        records[idx].turns = turns
+        records[idx].endedAt = Date()
+        save()
+        Log.session.info("history updated turns for id=\(sessionId.uuidString, privacy: .public) totalTurns=\(turns.count)")
     }
 
     func saveScreenshotIfNeeded(_ screenshot: ScreenshotCaptureResult?, sessionId: UUID) -> String? {
