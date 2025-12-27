@@ -236,6 +236,7 @@ final class OverlayPanelController {
     }
 
     func presentProcessing() {
+        cancelAutoDismiss()  // Don't auto-dismiss while AI is processing
         withAnimation(openAnimation) {
             model.mode = .processing
         }
@@ -362,13 +363,13 @@ private extension OverlayPanelController {
             self.hostingController = hosting
             self.panel = p
 
-            // Cancel auto-dismiss while hovering, re-enable keyboard for response mode
+            // Cancel auto-dismiss while hovering, re-enable keyboard for editable modes
             hoverCancellable = model.$isHovering.sink { [weak self] hovering in
                 guard let self else { return }
                 if hovering {
                     self.cancelAutoDismiss()
-                    // Re-enable keyboard when hovering expands response mode
-                    if self.model.mode == .response {
+                    // Re-enable keyboard when hovering expands response or review mode
+                    if self.model.mode == .response || self.model.mode == .review {
                         self.panel?.allowsKeyboardInput = true
                     }
                 } else if self.model.mode == .review || self.model.mode == .error {
@@ -419,11 +420,26 @@ private extension OverlayPanelController {
         let work = DispatchWorkItem { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
-                self.presentIdleChip()
+                // For review mode with transcript: retract instead of dismiss (like response mode)
+                // This lets the user hover back to continue editing
+                if self.model.mode == .review && !self.model.transcript.isEmpty {
+                    self.retractReview()
+                } else {
+                    self.presentIdleChip()
+                }
             }
         }
         autoDismissWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
+    }
+
+    /// Retract review mode (close visually but keep transcript for hover to restore)
+    func retractReview() {
+        withAnimation(closeAnimation) {
+            model.isOpen = false
+        }
+        // Keep mode as .review so hover shows editable transcript
+        panel?.allowsKeyboardInput = false
     }
 
     /// Auto-retract for response mode (keeps conversation state, hover brings it back)
@@ -825,13 +841,29 @@ private struct TranscriptActionsBody: View {
 
                     Spacer()
 
-                    // Send to AI button
-                    Button(action: { onSend?() }) {
-                        Label("Ask AI", systemImage: "arrow.up.circle.fill")
-                            .font(.callout.weight(.medium))
+                    // Send to AI - ChatGPT style
+                    HStack(spacing: 10) {
+                        Text("Ask AI")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.7))
+
+                        Button(action: { onSend?() }) {
+                            Image(systemName: "arrow.up")
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 32, height: 32)
+                                .background(
+                                    LinearGradient(
+                                        colors: [Color.cyan, Color(red: 0.3, green: 0.5, blue: 1.0)],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    )
+                                )
+                                .clipShape(Circle())
+                                .shadow(color: .cyan.opacity(0.5), radius: 6, x: 0, y: 2)
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.cyan)
                 }
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
@@ -1241,34 +1273,25 @@ private struct ReviewThumbnail: View {
 
 /// Animated typing indicator (iMessage-style bouncing dots)
 private struct TypingIndicator: View {
-    @State private var phase: CGFloat = 0
+    @State private var animating = false
 
     var body: some View {
         HStack(spacing: 5) {
-            ForEach(0..<3) { index in
+            ForEach(0..<3, id: \.self) { index in
                 Circle()
                     .fill(Color.white.opacity(0.6))
                     .frame(width: 8, height: 8)
-                    .offset(y: bounceOffset(for: index))
+                    .offset(y: animating ? -6 : 0)
+                    .animation(
+                        .easeInOut(duration: 0.4)
+                        .repeatForever(autoreverses: true)
+                        .delay(Double(index) * 0.15),
+                        value: animating
+                    )
             }
         }
         .onAppear {
-            withAnimation(.easeInOut(duration: 0.6).repeatForever(autoreverses: false)) {
-                phase = 1
-            }
-        }
-    }
-
-    private func bounceOffset(for index: Int) -> CGFloat {
-        // Stagger the animation for each dot
-        let delay = Double(index) * 0.15
-        let progress = (phase + delay).truncatingRemainder(dividingBy: 1.0)
-
-        // Bounce curve: quick up, slower down
-        if progress < 0.5 {
-            return -6 * sin(progress * .pi)
-        } else {
-            return 0
+            animating = true
         }
     }
 }

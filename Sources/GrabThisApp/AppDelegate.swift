@@ -61,14 +61,8 @@ private extension AppDelegate {
         item.button?.title = "grabthis"
 
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Open Onboarding", action: #selector(openOnboarding), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "History…", action: #selector(openHistory), keyEquivalent: "h"))
-        menu.addItem(NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ","))
-        menu.addItem(NSMenuItem(title: "Open Screen Recording Settings", action: #selector(openScreenRecordingSettings), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Open Input Monitoring Settings", action: #selector(openInputMonitoringSettings), keyEquivalent: ""))
-        menu.addItem(.separator())
-        menu.addItem(NSMenuItem(title: "Test Overlay", action: #selector(testOverlay), keyEquivalent: "t"))
-        menu.addItem(NSMenuItem(title: "Test Capture (Display)", action: #selector(testCapture), keyEquivalent: "c"))
+        menu.addItem(NSMenuItem(title: "Settings…", action: #selector(openOnboarding), keyEquivalent: ","))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit grabthis", action: #selector(quit), keyEquivalent: "q"))
         item.menu = menu
@@ -98,8 +92,8 @@ private extension AppDelegate {
         let view = OnboardingView()
         let hosting = NSHostingController(rootView: view)
         let window = NSWindow(contentViewController: hosting)
-        window.title = "Welcome to grabthis"
-        window.setContentSize(NSSize(width: 520, height: 420))
+        window.title = "grabthis Settings"
+        window.setContentSize(NSSize(width: 440, height: 580))
         window.styleMask = [.titled, .closable, .miniaturizable]
         window.isReleasedWhenClosed = false
 

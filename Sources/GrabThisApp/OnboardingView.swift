@@ -4,350 +4,223 @@ import SwiftUI
 
 struct OnboardingView: View {
     @StateObject private var model = OnboardingViewModel()
-    @State private var wantsAutoInsert: Bool = true
-    @State private var didCopyDiagnostics: Bool = false
+    @ObservedObject private var appState = AppState.shared
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            header
-            if !model.isBundledApp {
-                notBundledWarning
+        VStack(spacing: 0) {
+            // Header
+            VStack(spacing: 8) {
+                Text("grabthis")
+                    .font(.system(size: 32, weight: .bold))
+                Text("Hold fn, speak, get answers about your screen")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
-            identityCard
-            requirements
-            diagnosticsCard
-            actions
-            Spacer(minLength: 0)
+            .padding(.top, 32)
+            .padding(.bottom, 24)
+
+            Divider()
+
+            // Permissions list
+            ScrollView {
+                VStack(spacing: 12) {
+                    // Required permissions
+                    PermissionCard(
+                        icon: "mic.fill",
+                        title: "Microphone",
+                        description: "Listen to your voice",
+                        status: permissionStatus(model.micStatus),
+                        isGranted: model.micStatus == .authorized,
+                        action: { model.requestMic() }
+                    )
+
+                    PermissionCard(
+                        icon: "waveform",
+                        title: "Speech Recognition",
+                        description: "Transcribe what you say",
+                        status: permissionStatus(model.speechStatus),
+                        isGranted: model.speechStatus == .authorized,
+                        action: { model.requestSpeech() }
+                    )
+
+                    PermissionCard(
+                        icon: "rectangle.dashed.badge.record",
+                        title: "Screen Recording",
+                        description: "Capture the active window",
+                        status: model.screenRecordingAllowed ? "Allowed" : "Required",
+                        isGranted: model.screenRecordingAllowed,
+                        action: {
+                            model.requestScreenRecording()
+                            SystemSettingsDeepLinks.openScreenRecording()
+                        }
+                    )
+
+                    PermissionCard(
+                        icon: "keyboard",
+                        title: "Input Monitoring",
+                        description: "Detect fn key globally",
+                        status: "Open Settings",
+                        isGranted: false,  // Can't easily check this
+                        action: { SystemSettingsDeepLinks.openInputMonitoring() },
+                        alwaysShowButton: true
+                    )
+
+                    PermissionCard(
+                        icon: "hand.point.up.braille",
+                        title: "Accessibility",
+                        description: "Auto-paste into apps",
+                        status: model.accessibilityTrusted ? "Allowed" : "Optional",
+                        isGranted: model.accessibilityTrusted,
+                        action: {
+                            SystemSettingsDeepLinks.openAccessibility()
+                            AutoInsertService.requestAccessibilityPermissionPrompt()
+                        }
+                    )
+
+                    Divider()
+                        .padding(.vertical, 8)
+
+                    // Settings
+                    SettingsCard(appState: appState)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 16)
+            }
+
+            Divider()
+
+            // Footer actions
+            HStack {
+                if !model.screenRecordingAllowed {
+                    Button("Quit to Apply") {
+                        NSApp.terminate(nil)
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                Spacer()
+
+                Button("Refresh") {
+                    model.refresh()
+                }
+                .buttonStyle(.bordered)
+
+                Button(allRequiredGranted ? "Done" : "Continue Anyway") {
+                    model.markComplete()
+                    NSApp.keyWindow?.close()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .padding(20)
         }
-        .padding(24)
+        .frame(width: 440, height: 580)
         .background(.ultraThinMaterial)
         .onAppear { model.refresh() }
     }
+
+    private var allRequiredGranted: Bool {
+        model.micStatus == .authorized
+        && model.speechStatus == .authorized
+        && model.screenRecordingAllowed
+    }
+
+    private func permissionStatus(_ status: AVAuthorizationStatus) -> String {
+        switch status {
+        case .authorized: return "Allowed"
+        case .denied: return "Denied"
+        case .restricted: return "Restricted"
+        case .notDetermined: return "Required"
+        @unknown default: return "Unknown"
+        }
+    }
+
+    private func permissionStatus(_ status: SFSpeechRecognizerAuthorizationStatus) -> String {
+        switch status {
+        case .authorized: return "Allowed"
+        case .denied: return "Denied"
+        case .restricted: return "Restricted"
+        case .notDetermined: return "Required"
+        @unknown default: return "Unknown"
+        }
+    }
 }
 
-private extension OnboardingView {
-    var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Welcome to grabthis")
-                .font(.system(size: 26, weight: .semibold))
-            Text("Hold fn, speak what you want, and get an instant answer about what’s on your screen.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-        }
-    }
+// MARK: - Permission Card
 
-    var identityCard: some View {
-        let cs = CodeSigningInfo.current()
-        let bundleId = Bundle.main.bundleIdentifier ?? "nil"
-        let exe = Bundle.main.executableURL?.path ?? "nil"
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("App identity")
-                    .font(.headline)
-                Spacer()
-                Text(cs.isSigned ? "Signed" : "Unsigned")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+private struct PermissionCard: View {
+    let icon: String
+    let title: String
+    let description: String
+    let status: String
+    let isGranted: Bool
+    let action: () -> Void
+    var alwaysShowButton: Bool = false
+
+    var body: some View {
+        HStack(spacing: 12) {
+            // Status indicator
+            ZStack {
+                Circle()
+                    .fill(isGranted ? Color.green : Color.orange)
+                    .frame(width: 32, height: 32)
+                Image(systemName: icon)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
             }
 
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Bundle ID: \(bundleId)")
-                    .font(.callout)
-                Text("Team ID: \(cs.teamID ?? "nil")")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                Text("Executable: \(exe)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-
-            if !cs.isSigned {
-                Text("Unsigned apps often appear to “lose” permissions on restart. Use the build script with a stable Apple Development certificate.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            } else {
-                Text("If permissions feel flaky, make sure you always launch the same signed .app (not multiple copies).")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .padding(12)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(.white.opacity(0.10), lineWidth: 1)
-        )
-    }
-
-    var requirements: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Permissions")
-                .font(.headline)
-
-            PermissionRow(
-                title: "Microphone",
-                subtitle: "Required. Used for push‑to‑talk dictation.",
-                statusText: authText(for: model.micStatus),
-                isGranted: model.micStatus == .authorized
-            ) {
-                model.requestMic()
-            }
-            .disabled(!model.isBundledApp)
-
-            PermissionRow(
-                title: "Speech Recognition",
-                subtitle: "Required. Transcribes what you say.",
-                statusText: authText(for: model.speechStatus),
-                isGranted: model.speechStatus == .authorized
-            ) {
-                model.requestSpeech()
-            }
-            .disabled(!model.isBundledApp)
-
-            PermissionRow(
-                title: "Screen Recording",
-                subtitle: "Required. Allows grabthis to capture the active window screenshot.",
-                statusText: model.screenRecordingAllowed ? "Allowed" : "Not allowed",
-                isGranted: model.screenRecordingAllowed
-            ) {
-                model.requestScreenRecording()
-            }
-            .disabled(!model.isBundledApp)
-
-            if !model.screenRecordingAllowed {
-                ActionRow(
-                    title: "Screen Recording Settings",
-                    subtitle: "After enabling, macOS requires you to quit & relaunch grabthis.",
-                    buttonTitle: "Open Settings"
-                ) {
-                    SystemSettingsDeepLinks.openScreenRecording()
-                }
-
-                ActionRow(
-                    title: "Quit & relaunch",
-                    subtitle: "After you enable Screen Recording, quit grabthis and open it again.",
-                    buttonTitle: "Quit grabthis"
-                ) {
-                    NSApp.terminate(nil)
-                }
-            }
-
-            ActionRow(
-                title: "Input Monitoring",
-                subtitle: "Required. Lets grabthis detect fn/shortcuts globally while you’re in other apps.",
-                buttonTitle: "Open Settings"
-            ) {
-                SystemSettingsDeepLinks.openInputMonitoring()
-            }
-
-            VStack(alignment: .leading, spacing: 10) {
-                Toggle("Enable auto‑insert into the current app", isOn: $wantsAutoInsert)
+            // Text
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
                     .font(.subheadline.weight(.semibold))
-                Text("If enabled, grabthis will try to paste into Cursor and other apps automatically.")
-                    .font(.callout)
+                Text(description)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            .padding(12)
-            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-
-            if wantsAutoInsert {
-                PermissionRow(
-                    title: "Accessibility",
-                    subtitle: "Required (for auto‑insert). Allows grabthis to paste into other apps.",
-                    statusText: model.accessibilityTrusted ? "Allowed" : "Not allowed",
-                    isGranted: model.accessibilityTrusted
-                ) {
-                    SystemSettingsDeepLinks.openAccessibility()
-                    AutoInsertService.requestAccessibilityPermissionPrompt()
-                    model.refresh()
-                }
-                .disabled(!model.isBundledApp)
-            }
-        }
-    }
-
-    var diagnosticsCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Diagnostics")
-                    .font(.headline)
-                Spacer()
-                if didCopyDiagnostics {
-                    Text("Copied")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Text("If something feels off, copy this and paste it in an issue/logs.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-
-            Button("Copy diagnostics") { copyDiagnostics() }
-                .buttonStyle(.bordered)
-        }
-        .padding(12)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(.white.opacity(0.10), lineWidth: 1)
-        )
-    }
-
-    var actions: some View {
-        HStack {
-            Button("Refresh") { model.refresh() }
 
             Spacer()
 
-            Button(model.didComplete ? "Done" : "Continue") {
-                markCompleteAndClose()
+            // Status + Button
+            if isGranted && !alwaysShowButton {
+                Text(status)
+                    .font(.caption)
+                    .foregroundStyle(.green)
+            } else {
+                Button(isGranted ? "Open" : "Allow") {
+                    action()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(!isReadyToContinue)
-        }
-        .padding(.top, 8)
-    }
-
-    var isReadyToContinue: Bool {
-        model.isBundledApp
-        && model.micStatus == .authorized
-        && model.speechStatus == .authorized
-        && model.screenRecordingAllowed
-        && (!wantsAutoInsert || model.accessibilityTrusted)
-    }
-
-    func markCompleteAndClose() {
-        model.markComplete()
-        NSApp.keyWindow?.close()
-    }
-
-    func copyDiagnostics() {
-        let cs = CodeSigningInfo.current()
-        let bundleId = Bundle.main.bundleIdentifier ?? "nil"
-        let exe = Bundle.main.executableURL?.path ?? "nil"
-        let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "nil"
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "nil"
-
-        let text = """
-        grabthis diagnostics
-        - bundleId: \(bundleId)
-        - exe: \(exe)
-        - version: \(appVersion) (\(build))
-        - codesign: \(cs.statusDescription) signed=\(cs.isSigned) teamId=\(cs.teamID ?? "nil") signingId=\(cs.signingIdentifier ?? "nil")
-        - mic: \(authText(for: model.micStatus))
-        - speech: \(authText(for: model.speechStatus))
-        - screenRecording: \(model.screenRecordingAllowed ? "Allowed" : "Not allowed")
-        - accessibility: \(model.accessibilityTrusted ? "Allowed" : "Not allowed")
-        - wantsAutoInsert: \(wantsAutoInsert)
-        """
-
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
-        didCopyDiagnostics = true
-    }
-
-    func authText(for status: AVAuthorizationStatus) -> String {
-        switch status {
-        case .authorized: return "Allowed"
-        case .denied: return "Denied"
-        case .restricted: return "Restricted"
-        case .notDetermined: return "Not requested"
-        @unknown default: return "Unknown"
-        }
-    }
-
-    func authText(for status: SFSpeechRecognizerAuthorizationStatus) -> String {
-        switch status {
-        case .authorized: return "Allowed"
-        case .denied: return "Denied"
-        case .restricted: return "Restricted"
-        case .notDetermined: return "Not requested"
-        @unknown default: return "Unknown"
-        }
-    }
-
-    var notBundledWarning: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Run the bundled app to grant permissions")
-                .font(.subheadline.weight(.semibold))
-            Text("You’re currently running a raw executable (Bundle ID is nil). macOS privacy prompts (Mic/Speech/Screen Recording/Input Monitoring) may fail or crash. Please run the packaged .app from the build script.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
         }
         .padding(12)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(.white.opacity(0.10), lineWidth: 1)
-        )
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
     }
 }
 
-private struct PermissionRow: View {
-    let title: String
-    let subtitle: String
-    let statusText: String
-    let isGranted: Bool
-    let request: () -> Void
+// MARK: - Settings Card
+
+private struct SettingsCard: View {
+    @ObservedObject var appState: AppState
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Circle()
-                .fill(isGranted ? Color.green.opacity(0.9) : Color.orange.opacity(0.9))
-                .frame(width: 10, height: 10)
-                .padding(.top, 6)
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Settings")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
 
-            VStack(alignment: .leading, spacing: 2) {
-                HStack {
-                    Text(title).font(.subheadline.weight(.semibold))
-                    Spacer()
-                    Text(statusText)
+            Toggle(isOn: $appState.saveScreenshotsToHistory) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Save screenshots to History")
+                        .font(.subheadline)
+                    Text("Screenshots will be saved alongside transcripts")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Text(subtitle)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
             }
-
-            Button(isGranted ? "Granted" : "Allow") { request() }
-                .buttonStyle(.bordered)
-                .disabled(isGranted)
+            .toggleStyle(.switch)
         }
         .padding(12)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
     }
 }
-
-private struct ActionRow: View {
-    let title: String
-    let subtitle: String
-    let buttonTitle: String
-    let action: () -> Void
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Circle()
-                .fill(Color.blue.opacity(0.9))
-                .frame(width: 10, height: 10)
-                .padding(.top, 6)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.subheadline.weight(.semibold))
-                Text(subtitle)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer(minLength: 0)
-
-            Button(buttonTitle) { action() }
-                .buttonStyle(.bordered)
-        }
-        .padding(12)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-    }
-}
-
-

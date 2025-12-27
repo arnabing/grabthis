@@ -75,7 +75,12 @@ struct HistoryView: View {
                                 .font(.caption)
                                 .foregroundStyle(.tertiary)
                         }
+                        // Dark container for chat bubbles (matches overlay style)
                         ConversationView(turns: record.turns)
+                            .frame(maxHeight: 280)
+                            .background(Color(nsColor: .windowBackgroundColor).opacity(0.3))
+                            .background(Color.black.opacity(0.85))
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
                 } else {
                     // Fallback for legacy sessions without turns
