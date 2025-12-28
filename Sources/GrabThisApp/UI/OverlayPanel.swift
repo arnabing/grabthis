@@ -502,9 +502,10 @@ private struct OverlayRootView: View {
         ZStack(alignment: .top) {
             VStack(spacing: 0) {
                 notchContent
-                    .padding(.top, model.isOpen && model.hasPhysicalNotch ? model.closedNotchSize.height : 0)
-                    .padding(.horizontal, model.isOpen ? cornerRadiusInsets.opened.top : cornerRadiusInsets.closed.bottom)
-                    .padding([.horizontal, .bottom], model.isOpen ? 12 : 0)
+                    // v11 fix: No extra top padding (header is the spacer)
+                    // Horizontal padding must be > corner radius to avoid clipping pulsing status dot
+                    .padding(.horizontal, model.isOpen ? cornerRadiusInsets.opened.top + 4 : 0)
+                    .padding(.bottom, model.isOpen ? 12 : 0)
                     .background(Color.black)
                     .clipShape(NotchShape(
                         topCornerRadius: topCornerRadius,
@@ -555,9 +556,12 @@ private struct OverlayRootView: View {
                     .shadow(color: (model.isOpen || model.isHovering) ? .black.opacity(0.7) : .clear, radius: 6)
                     // Use explicit closed height instead of nil - nil might not animate properly
                     // Use taller height for chat mode (response/error)
+                    // v10 fix: Add alignment: .top to anchor content regardless of intrinsic height
+                    // Without this, shorter content (listening mode) gets centered, pushing it down
                     .frame(height: model.isOpen
                         ? (model.mode == .response || model.mode == .error ? chatNotchSize.height : openNotchSize.height)
-                        : model.closedNotchSize.height)
+                        : model.closedNotchSize.height,
+                        alignment: .top)
                     // Animate for BOTH mode changes AND direct isOpen changes (hover)
                     // boring.notch uses notchState for mode-triggered animations
                     .animation(model.isOpen ? openAnimation : closeAnimation, value: model.mode)
@@ -890,7 +894,7 @@ private struct TranscriptActionsBody: View {
         }
         .frame(maxHeight: .infinity, alignment: .top)  // Keep content top-aligned always
         .padding(.horizontal, 16)
-        .padding(.top, 8)
+        .padding(.top, 4)  // v11: Tighter spacing like boring.notch
         .padding(.bottom, 12)
         .onHover { hovering in onHover?(hovering) }
     }

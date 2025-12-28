@@ -29,6 +29,7 @@ final class SessionController: ObservableObject {
     private var currentSessionId: UUID?
     private var sessionStartedAt: Date?
     private var didSaveCurrentSession: Bool = false
+    private var screenshotSentToAI: Bool = false
 
     /// Local tracking of conversation turns for multi-turn context
     private var conversationTurns: [ConversationTurn] = []
