@@ -1,216 +1,156 @@
 import AVFoundation
+import Combine
 import Foundation
-import Speech
 
+// Shared notifications
+extension Notification.Name {
+    static let sttEngineChanged = Notification.Name("sttEngineChanged")
+    static let continueSession = Notification.Name("continueSession")
+}
+
+/// Factory and coordinator for STT engines.
+/// Wraps the active engine and publishes its state for UI consumption.
 @MainActor
 final class TranscriptionService: ObservableObject {
-    enum State: Equatable {
-        case idle
-        case listening
-        case stopped
-        case error(message: String)
-    }
+    // Re-export the enum for backward compatibility
+    typealias State = TranscriptionState
 
-    @Published private(set) var state: State = .idle
+    @Published private(set) var state: TranscriptionState = .idle
     @Published private(set) var partialText: String = ""
     @Published private(set) var finalText: String = ""
 
-    private let recognizer: SFSpeechRecognizer?
-    private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
-    private var recognitionTask: SFSpeechRecognitionTask?
-    private var stopRequestedAt: Date?
-
-    private let audioEngine = AVAudioEngine()
-
-    init(locale: Locale = .current) {
-        self.recognizer = SFSpeechRecognizer(locale: locale)
-    }
-
-    func start() throws {
-        Log.stt.info("start() called")
-        guard state == .idle || state == .stopped else { return }
-        guard SFSpeechRecognizer.authorizationStatus() == .authorized else {
-            state = .error(message: "Speech Recognition permission not granted")
-            Log.stt.error("speech auth not granted")
-            return
-        }
-        let mic = AVCaptureDevice.authorizationStatus(for: .audio)
-        if mic != .authorized {
-            Log.stt.error("microphone auth not granted: \(String(describing: mic))")
-        }
-        if recognizer == nil {
-            Log.stt.error("SFSpeechRecognizer is nil for current locale")
-        }
-
-        partialText = ""
-        finalText = ""
-
-        // IMPORTANT: The audio tap callback runs off the main thread.
-        // Do not touch @MainActor state from inside that callback.
-        // Capture the request as a local constant and append buffers directly to it.
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = true
-        request.requiresOnDeviceRecognition = false
-        self.recognitionRequest = request
-
-        let inputNode = audioEngine.inputNode
-        let recordingFormat = inputNode.outputFormat(forBus: 0)
-        Log.stt.debug("audio format: \(recordingFormat.debugDescription, privacy: .public)")
-        inputNode.removeTap(onBus: 0)
-        // The tap is called on a realtime queue. If this closure is inferred as @MainActor,
-        // Swift will crash with a libdispatch assertion. Create the block in a nonisolated
-        // context to prevent global-actor inference.
-        let tap = Self.makeTapBlock(request)
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat, block: tap)
-
-        audioEngine.prepare()
-        do {
-            try audioEngine.start()
-        } catch {
-            state = .error(message: "Audio engine failed to start: \(error.localizedDescription)")
-            Log.stt.error("audio engine start failed: \(error.localizedDescription, privacy: .public)")
-            throw error
-        }
-
-        state = .listening
-        Log.stt.info("listening started")
-        stopRequestedAt = nil
-
-        recognitionTask = recognizer?.recognitionTask(with: request) { [weak self] result, error in
-            guard let self else { return }
-            Task { @MainActor in
-                if let result {
-                    self.partialText = result.bestTranscription.formattedString
-                    Log.stt.debug("partial: \(self.partialText, privacy: .public)")
-                    if result.isFinal {
-                        self.finalText = self.partialText
-                        // IMPORTANT: The recognizer can emit `isFinal` while we’re still holding
-                        // push-to-talk (e.g., brief silence). Do not end the session early.
-                        if self.stopRequestedAt != nil {
-                            self.state = .stopped
-                        }
-                        Log.stt.info("final: \(self.finalText, privacy: .public) stopRequested=\(self.stopRequestedAt != nil, privacy: .public)")
-                    }
-                }
-                if let error {
-                    // If we’re stopping and we already have text, prefer a “stopped” state to keep the
-                    // Wispr-like feel rather than surfacing an error.
-                    if self.stopRequestedAt != nil, !self.partialText.isEmpty {
-                        self.finalText = self.finalText.isEmpty ? self.partialText : self.finalText
-                        self.state = .stopped
-                        Log.stt.error("recognition error during stop (ignored due to text): \(error.localizedDescription, privacy: .public)")
-                    } else {
-                        self.state = .error(message: error.localizedDescription)
-                        Log.stt.error("recognition error: \(error.localizedDescription, privacy: .public)")
-                    }
-                }
+    /// The currently selected engine type. Change this to switch engines.
+    @Published var engineType: TranscriptionEngineType {
+        didSet {
+            if engineType != oldValue {
+                UserDefaults.standard.set(engineType.rawValue, forKey: "sttEngineType")
+                recreateEngine()
             }
         }
     }
 
-    /// Stop capture while giving the recognizer a tiny grace window to emit the last word(s).
-    /// This reduces the “clips the last word” feeling in push-to-talk flows.
-    func stopAndFinalize(tailNanoseconds: UInt64 = 180_000_000, finalWaitNanoseconds: UInt64 = 650_000_000) async {
-        // The recognizer can emit a `.stopped`/`.error` state asynchronously; we still must stop the
-        // audio engine + tap to avoid leaking audio capture and to finalize text.
-        if !audioEngine.isRunning, recognitionRequest == nil, recognitionTask == nil {
+    private var engine: (any TranscriptionEngine)?
+    private var cancellables = Set<AnyCancellable>()
+    private let locale: Locale
+
+    init(locale: Locale = .current) {
+        self.locale = locale
+
+        // Load saved preference or default to SFSpeech (stable, cloud-based)
+        // SpeechAnalyzer (on-device) is opt-in due to macOS 26 beta instability
+        if let saved = UserDefaults.standard.string(forKey: "sttEngineType"),
+           let type = TranscriptionEngineType(rawValue: saved) {
+            self.engineType = type
+        } else {
+            self.engineType = .speechAnalyzer
+        }
+
+        recreateEngine()
+
+        // Listen for engine changes from Settings
+        NotificationCenter.default.addObserver(
+            forName: .sttEngineChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.reloadFromDefaults()
+            }
+        }
+    }
+
+    /// Reload engine type from UserDefaults (called when settings change)
+    func reloadFromDefaults() {
+        if let saved = UserDefaults.standard.string(forKey: "sttEngineType"),
+           let type = TranscriptionEngineType(rawValue: saved),
+           type != engineType {
+            Log.stt.notice("🔄 Engine changed via Settings: \(type.displayName)")
+            engineType = type
+        }
+    }
+
+    func start() async throws {
+        guard let engine else {
+            Log.stt.error("No transcription engine available")
+            state = .error(message: "Transcription engine not initialized")
             return
         }
-        stopRequestedAt = Date()
-        Log.stt.info("stopAndFinalize() called tailNs=\(tailNanoseconds, privacy: .public) waitNs=\(finalWaitNanoseconds, privacy: .public)")
+        try await engine.start()
+    }
 
-        // Keep capturing just a touch after key-up.
-        if tailNanoseconds > 0 {
-            try? await Task.sleep(nanoseconds: tailNanoseconds)
-        }
-
-        // Stop audio input and signal end of audio. Do NOT cancel recognitionTask immediately;
-        // we want a chance to receive a final result.
-        audioEngine.stop()
-        audioEngine.inputNode.removeTap(onBus: 0)
-        recognitionRequest?.endAudio()
-
-        let deadline = Date().addingTimeInterval(Double(finalWaitNanoseconds) / 1_000_000_000.0)
-        while Date() < deadline {
-            if !finalText.isEmpty { break }
-            if case .error = state { break }
-            // Let callbacks run.
-            try? await Task.sleep(nanoseconds: 35_000_000)
-        }
-
-        // Cleanup task/request.
-        recognitionTask?.cancel()
-        recognitionTask = nil
-        recognitionRequest = nil
-
-        // Prefer final, otherwise keep the best partial.
-        if finalText.isEmpty {
-            finalText = partialText
-        }
-
-        // If the recognizer reported an error like "No speech detected" but we have text,
-        // treat it as a stopped session (Wispr-like).
-        if case .error(let message) = state, !finalText.isEmpty {
-            Log.stt.error("stop finalize overriding error due to captured text: \(message, privacy: .public)")
-            state = .stopped
-        } else if case .listening = state {
-            state = .stopped
-        }
-
-        Log.stt.info("finalized finalTextLen=\(self.finalText.count, privacy: .public) partialLen=\(self.partialText.count, privacy: .public)")
+    func stopAndFinalize(tailNanoseconds: UInt64 = 180_000_000, finalWaitNanoseconds: UInt64 = 650_000_000) async {
+        await engine?.stopAndFinalize(tailNanoseconds: tailNanoseconds, finalWaitNanoseconds: finalWaitNanoseconds)
     }
 
     func reset() {
-        if state == .listening {
-            Task { @MainActor in
-                await self.stopAndFinalize(tailNanoseconds: 0, finalWaitNanoseconds: 0)
-            }
-        }
+        engine?.reset()
+    }
+
+    /// Check if the SpeechAnalyzer model is available for the current locale.
+    func isSpeechAnalyzerModelAvailable() async -> Bool {
+        await SpeechAnalyzerTranscriptionEngine.isModelAvailable(for: locale)
+    }
+
+    /// Download the SpeechAnalyzer model for the current locale.
+    func downloadSpeechAnalyzerModel() async throws {
+        try await SpeechAnalyzerTranscriptionEngine.downloadModel(for: locale)
+    }
+
+    /// Get download progress stream for the SpeechAnalyzer model.
+    func speechAnalyzerModelDownloadProgress() -> AsyncStream<Double> {
+        SpeechAnalyzerTranscriptionEngine.downloadProgress(for: locale)
+    }
+
+    private func recreateEngine() {
+        // Cancel existing subscriptions
+        cancellables.removeAll()
+
+        // Reset state
+        state = .idle
         partialText = ""
         finalText = ""
-        state = .idle
+
+        // Create engine based on type
+        switch engineType {
+        case .speechAnalyzer:
+            let speechAnalyzerEngine = SpeechAnalyzerTranscriptionEngine(locale: locale)
+            bindEngine(speechAnalyzerEngine)
+            engine = speechAnalyzerEngine
+            Log.stt.notice("🎤 ENGINE ACTIVE: SpeechAnalyzer (on-device, fast)")
+
+        case .sfSpeech:
+            let sfEngine = SFSpeechTranscriptionEngine(locale: locale)
+            bindEngine(sfEngine)
+            engine = sfEngine
+            Log.stt.notice("🎤 ENGINE ACTIVE: SFSpeech (cloud-based)")
+        }
+    }
+
+    private func bindEngine<E: TranscriptionEngine>(_ engine: E) {
+        // Note: objectWillChange fires BEFORE properties change.
+        // We use a slight delay to sync AFTER the actual property change.
+        engine.objectWillChange
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                // Delay slightly so we read the NEW values, not the old ones
+                DispatchQueue.main.async {
+                    self?.syncFromEngine(engine)
+                }
+            }
+            .store(in: &cancellables)
+
+        // Initial sync
+        syncFromEngine(engine)
+    }
+
+    private func syncFromEngine<E: TranscriptionEngine>(_ engine: E) {
+        self.state = engine.state
+        self.partialText = engine.partialText
+        self.finalText = engine.finalText
+
+        // Debug log to verify values are syncing correctly
+        if !finalText.isEmpty || !partialText.isEmpty {
+            Log.stt.debug("🔄 sync: state=\(String(describing: self.state)) partial=\(self.partialText.prefix(30))... final=\(self.finalText.prefix(30))...")
+        }
     }
 }
-
-private extension TranscriptionService {
-    nonisolated static func makeTapBlock(_ request: SFSpeechAudioBufferRecognitionRequest) -> (AVAudioPCMBuffer, AVAudioTime) -> Void {
-        { buffer, _ in
-            request.append(buffer)
-            // Drive notch visualizer with real mic level (safe for audio thread).
-            let rms = computeRMS(buffer)
-            AudioLevelService.ingestFromAudioThread(rms: rms)
-        }
-    }
-
-    nonisolated static func computeRMS(_ buffer: AVAudioPCMBuffer) -> Float {
-        let frameLength = Int(buffer.frameLength)
-        guard frameLength > 0 else { return 0 }
-
-        // Prefer float samples.
-        if let data = buffer.floatChannelData {
-            let ch0 = data[0]
-            var sum: Float = 0
-            for i in 0..<frameLength {
-                let v = ch0[i]
-                sum += v * v
-            }
-            return sqrt(sum / Float(frameLength))
-        }
-
-        // Fallback: int16 samples.
-        if let data = buffer.int16ChannelData {
-            let ch0 = data[0]
-            var sum: Float = 0
-            let denom: Float = 32768.0
-            for i in 0..<frameLength {
-                let v = Float(ch0[i]) / denom
-                sum += v * v
-            }
-            return sqrt(sum / Float(frameLength))
-        }
-
-        return 0
-    }
-}
-
-

@@ -39,6 +39,18 @@ final class SessionController: ObservableObject {
         self.overlay = overlay
         self.transcription = TranscriptionService()
         self.overlay.presentIdleChip()
+
+        // Listen for "continue session" requests from History
+        NotificationCenter.default.addObserver(
+            forName: .continueSession,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let record = notification.object as? SessionRecord else { return }
+            Task { @MainActor in
+                self?.continueSession(from: record)
+            }
+        }
     }
 
     func begin() {
@@ -107,10 +119,10 @@ final class SessionController: ObservableObject {
         }
 
         // Start transcription after the overlay is already visible; this yields back to the run loop,
-        // reducing the “fn → listening” perceived latency.
+        // reducing the "fn → listening" perceived latency.
         Task { @MainActor in
             do {
-                try self.transcription.start()
+                try await self.transcription.start()
                 FeedbackSoundService.playStart()
                 if let listeningStartedAt {
                     let ms = Int(Date().timeIntervalSince(listeningStartedAt) * 1000.0)
@@ -367,7 +379,7 @@ final class SessionController: ObservableObject {
         // Start transcription for follow-up
         Task { @MainActor in
             do {
-                try self.transcription.start()
+                try await self.transcription.start()
                 FeedbackSoundService.playStart()
                 if let listeningStartedAt {
                     let ms = Int(Date().timeIntervalSince(listeningStartedAt) * 1000.0)
@@ -465,6 +477,56 @@ final class SessionController: ObservableObject {
 
         // Send to AI
         sendToAI()
+    }
+
+    /// Continue a conversation from History
+    /// Loads the existing turns and presents the overlay in response mode
+    func continueSession(from record: SessionRecord) {
+        Log.session.info("continueSession from history id=\(record.id.uuidString, privacy: .public) turns=\(record.turns.count)")
+
+        // If there's an active session, archive it first
+        if phase != .idle {
+            archiveCurrent(endReason: .interrupted)
+            resetToIdle()
+        }
+
+        // Set up session state from the record
+        currentSessionId = record.id
+        sessionStartedAt = record.startedAt
+        didSaveCurrentSession = true  // Already in history, don't re-save
+        conversationTurns = record.turns
+        isFollowUp = false
+        transcriptDraft = record.transcript
+
+        // Load screenshot if available
+        if let screenshotPath = record.screenshotPath,
+           let nsImage = NSImage(contentsOfFile: screenshotPath),
+           let cgImage = nsImage.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            screenshot = ScreenshotCaptureResult(
+                image: cgImage,
+                pixelWidth: cgImage.width,
+                pixelHeight: cgImage.height,
+                scale: 2.0  // Assume retina
+            )
+        }
+
+        // Set up app context from record
+        appContext = ActiveAppContext(
+            appName: record.appName,
+            bundleIdentifier: record.bundleIdentifier ?? "",
+            pid: pid_t(record.targetPID ?? 0)
+        )
+
+        // Update overlay model
+        overlay.model.conversationTurns = conversationTurns
+        overlay.model.appName = record.appName
+        overlay.model.screenshot = screenshot
+        overlay.model.followUpInputText = ""
+
+        // Present in response mode with last AI response (this also shows the overlay)
+        let lastResponse = record.aiResponse ?? ""
+        overlay.presentResponse(lastResponse)
+        phase = .response
     }
 }
 

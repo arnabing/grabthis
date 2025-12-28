@@ -97,7 +97,7 @@ final class OverlayPanelController {
         @Published var transcript: String = ""
         @Published var screenshot: ScreenshotCaptureResult?
         @Published var responseText: String = ""
-        @Published var accessibilityTrusted: Bool = true
+        @Published var accessibilityTrusted: Bool = PermissionMonitor.shared.accessibilityGranted
         @Published var audioLevel: Double = 0.0
         @Published var isHovering: Bool = false
         @Published var isOpen: Bool = false  // Now a stored property
@@ -118,6 +118,7 @@ final class OverlayPanelController {
         @Published var lastAppName: String = ""
         @Published var lastScreenshot: ScreenshotCaptureResult?
         @Published var lastAIResponse: String?
+        @Published var lastConversationTurns: [ConversationTurn] = []
 
         // Multi-turn conversation state
         @Published var conversationTurns: [ConversationTurn] = []
@@ -151,8 +152,20 @@ final class OverlayPanelController {
     private var autoDismissWork: DispatchWorkItem?
     private var hoverCancellable: AnyCancellable?
     private var escKeyMonitor: Any?
+    private var permissionCancellable: AnyCancellable?
 
     var isOverlayKeyWindow: Bool { panel?.isKeyWindow ?? false }
+
+    init() {
+        // Subscribe to permission changes to keep accessibility status updated
+        permissionCancellable = NotificationCenter.default.publisher(for: PermissionMonitor.accessibilityDidChange)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] notification in
+                if let granted = notification.userInfo?["granted"] as? Bool {
+                    self?.model.accessibilityTrusted = granted
+                }
+            }
+    }
 
     func hide() {
         withAnimation(closeAnimation) {
@@ -173,11 +186,12 @@ final class OverlayPanelController {
         }
 
         // Save last session info before clearing (for idle hover display)
-        if !model.transcript.isEmpty {
+        if !model.transcript.isEmpty || !model.conversationTurns.isEmpty {
             model.lastTranscript = model.transcript
             model.lastAppName = model.appName
             model.lastScreenshot = model.screenshot
             model.lastAIResponse = model.responseText.isEmpty ? nil : model.responseText
+            model.lastConversationTurns = model.conversationTurns
         }
 
         withAnimation(closeAnimation) {
@@ -190,6 +204,12 @@ final class OverlayPanelController {
         model.followUpInputText = ""
         model.isRecordingFollowUp = false
         model.conversationTurns = []
+        // Set onClose to just retract the notch (not cancel a session)
+        model.onClose = { [weak self] in
+            withAnimation(closeAnimation) {
+                self?.model.isOpen = false
+            }
+        }
         // Disable keyboard input when not in chat mode
         panel?.allowsKeyboardInput = false
         cancelAutoDismiss()
@@ -204,6 +224,7 @@ final class OverlayPanelController {
         model.lastTranscript = ""
         model.lastAppName = ""
         model.lastScreenshot = nil
+        model.lastConversationTurns = []
         model.lastAIResponse = nil
         withAnimation(openAnimation) {
             model.mode = .listening
@@ -481,6 +502,7 @@ private struct OverlayRootView: View {
         ZStack(alignment: .top) {
             VStack(spacing: 0) {
                 notchContent
+                    .padding(.top, model.isOpen && model.hasPhysicalNotch ? model.closedNotchSize.height : 0)
                     .padding(.horizontal, model.isOpen ? cornerRadiusInsets.opened.top : cornerRadiusInsets.closed.bottom)
                     .padding([.horizontal, .bottom], model.isOpen ? 12 : 0)
                     .background(Color.black)
@@ -779,33 +801,29 @@ private struct TranscriptActionsBody: View {
     var body: some View {
         VStack(spacing: 12) {
             // Top section: Transcript + thumbnail side by side
+            // Fixed height (100pt = screenshot height) ensures consistent layout across modes
             HStack(alignment: .top, spacing: 12) {
                 // Left: Transcript (editable in review mode)
                 VStack(alignment: .leading, spacing: 8) {
-                    if isEditable {
-                        // Editable text field for review mode
-                        TextEditor(text: $transcript)
-                            .font(.body)
-                            .foregroundStyle(.white.opacity(0.9))
-                            .scrollContentBackground(.hidden)
-                            .background(Color.white.opacity(0.05))
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                            .frame(minHeight: 60, maxHeight: 100)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(Color.white.opacity(0.15), lineWidth: 1)
-                            )
-                    } else if !transcript.isEmpty {
-                        Text(transcript)
-                            .font(.body)
-                            .foregroundStyle(.white.opacity(0.9))
-                            .lineLimit(aiResponse != nil ? 2 : 4)
-                    } else {
-                        Text(placeholderText)
-                            .font(.body)
-                            .foregroundStyle(.white.opacity(0.5))
-                            .contentTransition(.interpolate)
-                    }
+                    // Use TextEditor in ALL modes to guarantee identical text positioning
+                    // (TextEditor and Text have different internal text offsets that cannot be matched)
+                    TextEditor(text: isEditable
+                        ? $transcript
+                        : .constant(transcript.isEmpty ? placeholderText : transcript)
+                    )
+                    .font(.body)
+                    .foregroundStyle(.white.opacity(
+                        transcript.isEmpty && !isEditable ? 0.5 : 0.9
+                    ))
+                    .scrollContentBackground(.hidden)
+                    .background(Color.white.opacity(0.05))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .frame(minHeight: 60, maxHeight: 100)
+                    .disabled(!isEditable)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.white.opacity(isEditable ? 0.15 : 0), lineWidth: 1)
+                    )
 
                     // Show AI response if available (for idle hover)
                     if let response = aiResponse, !response.isEmpty {
@@ -815,7 +833,7 @@ private struct TranscriptActionsBody: View {
                             .lineLimit(2)
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
 
                 // Right: Screenshot thumbnail
                 if screenshot != nil {
@@ -826,7 +844,9 @@ private struct TranscriptActionsBody: View {
                     .transition(.opacity.combined(with: .scale(scale: 0.8)))
                 }
             }
+            .frame(height: 100)  // Fixed height ensures consistent layout in all modes
 
+            // Always use spacer to push content to top
             Spacer()
 
             // Bottom section: Action buttons
@@ -841,7 +861,7 @@ private struct TranscriptActionsBody: View {
 
                     Spacer()
 
-                    // Send to AI - ChatGPT style
+                    // Send to AI - ChatGPT style (larger)
                     HStack(spacing: 10) {
                         Text("Ask AI")
                             .font(.system(size: 14, weight: .medium))
@@ -849,9 +869,9 @@ private struct TranscriptActionsBody: View {
 
                         Button(action: { onSend?() }) {
                             Image(systemName: "arrow.up")
-                                .font(.system(size: 16, weight: .bold))
+                                .font(.system(size: 18, weight: .bold))
                                 .foregroundStyle(.white)
-                                .frame(width: 32, height: 32)
+                                .frame(width: 40, height: 40)
                                 .background(
                                     LinearGradient(
                                         colors: [Color.cyan, Color(red: 0.3, green: 0.5, blue: 1.0)],
@@ -868,6 +888,7 @@ private struct TranscriptActionsBody: View {
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
         }
+        .frame(maxHeight: .infinity, alignment: .top)  // Keep content top-aligned always
         .padding(.horizontal, 16)
         .padding(.top, 8)
         .padding(.bottom, 12)
@@ -967,18 +988,27 @@ private struct ResponseBodyContent: View {
 
     var body: some View {
         VStack(spacing: 8) {
-            // Show conversation turns if available, otherwise just response text
-            if !model.conversationTurns.isEmpty && !isError {
+            // Always show conversation turns if available (including in error mode)
+            if !model.conversationTurns.isEmpty {
                 ConversationView(
                     turns: model.conversationTurns,
                     compact: true,
-                    maxHeight: 120
+                    maxHeight: isError ? 80 : 120
                 )
+
+                // Show error message below conversation if in error mode
+                if isError {
+                    Text(model.responseText)
+                        .font(.caption)
+                        .foregroundStyle(.red.opacity(0.9))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 8)
+                }
             } else {
-                // Fallback for errors or single response
+                // Fallback for empty conversation
                 Text(model.responseText)
                     .font(.body)
-                    .foregroundStyle(.white.opacity(0.9))
+                    .foregroundStyle(isError ? .red.opacity(0.9) : .white.opacity(0.9))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .lineLimit(4)
             }

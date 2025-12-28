@@ -1,10 +1,26 @@
 @preconcurrency import AVFoundation
 import Foundation
 import Speech
+import SwiftUI
+
+/// Steps in the onboarding wizard
+enum OnboardingStep: CaseIterable {
+    case welcome
+    case microphone        // Required
+    case speechRecognition // Required
+    case screenRecording   // Required
+    case inputMonitoring   // Optional
+    case accessibility     // Optional
+    case finished
+}
 
 @MainActor
 final class OnboardingViewModel: ObservableObject {
-    private static let permissionsDidChangeNotification = Notification.Name("grabthis.permissionsDidChange")
+    // MARK: - Step Management
+
+    @Published var currentStep: OnboardingStep = .welcome
+
+    // MARK: - Permission States
 
     @Published var micStatus: AVAuthorizationStatus
     @Published var speechStatus: SFSpeechRecognizerAuthorizationStatus
@@ -12,6 +28,8 @@ final class OnboardingViewModel: ObservableObject {
     @Published var accessibilityTrusted: Bool
     @Published var didComplete: Bool
     @Published var isBundledApp: Bool
+
+    // MARK: - Init
 
     init() {
         self.micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
@@ -21,8 +39,12 @@ final class OnboardingViewModel: ObservableObject {
         self.didComplete = UserDefaults.standard.bool(forKey: AppState.Keys.onboardingCompleted)
         self.isBundledApp = Bundle.main.bundleIdentifier != nil
 
+        // Start permission monitoring
+        PermissionMonitor.shared.startMonitoring(interval: 2.0)
+
+        // Listen for permission changes
         NotificationCenter.default.addObserver(
-            forName: Self.permissionsDidChangeNotification,
+            forName: PermissionMonitor.permissionsDidChange,
             object: nil,
             queue: .main
         ) { [weak self] _ in
@@ -31,6 +53,57 @@ final class OnboardingViewModel: ObservableObject {
             }
         }
     }
+
+    deinit {
+        Task { @MainActor in
+            PermissionMonitor.shared.stopMonitoring()
+        }
+    }
+
+    // MARK: - Step Navigation
+
+    func nextStep() {
+        guard let currentIndex = OnboardingStep.allCases.firstIndex(of: currentStep),
+              currentIndex < OnboardingStep.allCases.count - 1 else {
+            return
+        }
+        let next = OnboardingStep.allCases[currentIndex + 1]
+        withAnimation(.easeInOut(duration: 0.4)) {
+            currentStep = next
+        }
+    }
+
+    func previousStep() {
+        guard let currentIndex = OnboardingStep.allCases.firstIndex(of: currentStep),
+              currentIndex > 0 else {
+            return
+        }
+        let prev = OnboardingStep.allCases[currentIndex - 1]
+        withAnimation(.easeInOut(duration: 0.4)) {
+            currentStep = prev
+        }
+    }
+
+    func goToStep(_ step: OnboardingStep) {
+        withAnimation(.easeInOut(duration: 0.4)) {
+            currentStep = step
+        }
+    }
+
+    // MARK: - Status Helpers
+
+    var allRequiredGranted: Bool {
+        micStatus == .authorized
+        && speechStatus == .authorized
+        && screenRecordingAllowed
+    }
+
+    var stepProgress: Double {
+        guard let index = OnboardingStep.allCases.firstIndex(of: currentStep) else { return 0 }
+        return Double(index) / Double(OnboardingStep.allCases.count - 1)
+    }
+
+    // MARK: - Refresh
 
     func refresh() {
         isBundledApp = Bundle.main.bundleIdentifier != nil
@@ -41,40 +114,53 @@ final class OnboardingViewModel: ObservableObject {
         didComplete = UserDefaults.standard.bool(forKey: AppState.Keys.onboardingCompleted)
     }
 
-    func requestMic() {
-        guard Bundle.main.bundleIdentifier != nil else { return }
-        AVCaptureDevice.requestAccess(for: .audio, completionHandler: Self.handleMicAuthorization(_:))
+    // MARK: - Permission Requests
+
+    @discardableResult
+    func requestMic() async -> Bool {
+        guard isBundledApp else { return false }
+        let granted = await PermissionMonitor.shared.requestMicrophone()
+        refresh()
+        return granted
     }
 
-    func requestSpeech() {
-        guard Bundle.main.bundleIdentifier != nil else { return }
-        SFSpeechRecognizer.requestAuthorization(Self.handleSpeechAuthorization(_:))
+    @discardableResult
+    func requestSpeech() async -> Bool {
+        guard isBundledApp else { return false }
+        let granted = await PermissionMonitor.shared.requestSpeechRecognition()
+        refresh()
+        return granted
     }
 
     func requestScreenRecording() {
-        guard Bundle.main.bundleIdentifier != nil else { return }
-        // May show system prompt; refresh afterwards.
-        _ = PermissionsService.requestScreenRecordingPermission()
+        guard isBundledApp else { return }
+        PermissionMonitor.shared.requestScreenRecording()
+        SystemSettingsDeepLinks.openScreenRecording()
         refresh()
     }
+
+    func requestAccessibility() {
+        PermissionMonitor.shared.requestAccessibility()
+        SystemSettingsDeepLinks.openAccessibility()
+        refresh()
+    }
+
+    func openInputMonitoring() {
+        SystemSettingsDeepLinks.openInputMonitoring()
+    }
+
+    // MARK: - Completion
 
     func markComplete() {
         UserDefaults.standard.set(true, forKey: AppState.Keys.onboardingCompleted)
+        PermissionMonitor.shared.stopMonitoring()
         refresh()
     }
 
-    // MARK: - Nonisolated callbacks (TCC may invoke on background queues)
-
-    nonisolated private static func handleMicAuthorization(_ granted: Bool) {
-        Task { @MainActor in
-            NotificationCenter.default.post(name: Self.permissionsDidChangeNotification, object: nil)
-        }
-    }
-
-    nonisolated private static func handleSpeechAuthorization(_ status: SFSpeechRecognizerAuthorizationStatus) {
-        Task { @MainActor in
-            NotificationCenter.default.post(name: Self.permissionsDidChangeNotification, object: nil)
-        }
+    func resetOnboarding() {
+        UserDefaults.standard.set(false, forKey: AppState.Keys.onboardingCompleted)
+        currentStep = .welcome
+        refresh()
     }
 }
 

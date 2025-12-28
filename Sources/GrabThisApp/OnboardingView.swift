@@ -2,152 +2,157 @@ import AVFoundation
 import Speech
 import SwiftUI
 
+/// Sequential onboarding wizard (boring.notch pattern)
 struct OnboardingView: View {
     @StateObject private var model = OnboardingViewModel()
-    @ObservedObject private var appState = AppState.shared
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Header
-            VStack(spacing: 8) {
-                Text("grabthis")
-                    .font(.system(size: 32, weight: .bold))
-                Text("Hold fn, speak, get answers about your screen")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.top, 32)
-            .padding(.bottom, 24)
-
-            Divider()
-
-            // Permissions list
-            ScrollView {
-                VStack(spacing: 12) {
-                    // Required permissions
-                    PermissionCard(
-                        icon: "mic.fill",
-                        title: "Microphone",
-                        description: "Listen to your voice",
-                        status: permissionStatus(model.micStatus),
-                        isGranted: model.micStatus == .authorized,
-                        action: { model.requestMic() }
-                    )
-
-                    PermissionCard(
-                        icon: "waveform",
-                        title: "Speech Recognition",
-                        description: "Transcribe what you say",
-                        status: permissionStatus(model.speechStatus),
-                        isGranted: model.speechStatus == .authorized,
-                        action: { model.requestSpeech() }
-                    )
-
-                    PermissionCard(
-                        icon: "rectangle.dashed.badge.record",
-                        title: "Screen Recording",
-                        description: "Capture the active window",
-                        status: model.screenRecordingAllowed ? "Allowed" : "Required",
-                        isGranted: model.screenRecordingAllowed,
-                        action: {
-                            model.requestScreenRecording()
-                            SystemSettingsDeepLinks.openScreenRecording()
-                        }
-                    )
-
-                    PermissionCard(
-                        icon: "keyboard",
-                        title: "Input Monitoring",
-                        description: "Detect fn key globally",
-                        status: "Open Settings",
-                        isGranted: false,  // Can't easily check this
-                        action: { SystemSettingsDeepLinks.openInputMonitoring() },
-                        alwaysShowButton: true
-                    )
-
-                    PermissionCard(
-                        icon: "hand.point.up.braille",
-                        title: "Accessibility",
-                        description: "Auto-paste into apps",
-                        status: model.accessibilityTrusted ? "Allowed" : "Optional",
-                        isGranted: model.accessibilityTrusted,
-                        action: {
-                            SystemSettingsDeepLinks.openAccessibility()
-                            AutoInsertService.requestAccessibilityPermissionPrompt()
-                        }
-                    )
-
-                    Divider()
-                        .padding(.vertical, 8)
-
-                    // Settings
-                    SettingsCard(appState: appState)
-                }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 16)
-            }
-
-            Divider()
-
-            // Footer actions
-            HStack {
-                if !model.screenRecordingAllowed {
-                    Button("Quit to Apply") {
-                        NSApp.terminate(nil)
-                    }
-                    .buttonStyle(.bordered)
-                }
-
-                Spacer()
-
-                Button("Refresh") {
-                    model.refresh()
-                }
-                .buttonStyle(.bordered)
-
-                Button(allRequiredGranted ? "Done" : "Continue Anyway") {
-                    model.markComplete()
-                    NSApp.keyWindow?.close()
-                }
-                .buttonStyle(.borderedProminent)
-            }
-            .padding(20)
+        ZStack {
+            // Step content with transitions
+            stepContent
+                .transition(.asymmetric(
+                    insertion: .move(edge: .trailing).combined(with: .opacity),
+                    removal: .move(edge: .leading).combined(with: .opacity)
+                ))
+                .id(model.currentStep)  // Force view identity change for transition
         }
-        .frame(width: 440, height: 580)
+        .frame(width: 440, height: 520)
         .background(.ultraThinMaterial)
         .onAppear { model.refresh() }
     }
 
-    private var allRequiredGranted: Bool {
-        model.micStatus == .authorized
-        && model.speechStatus == .authorized
-        && model.screenRecordingAllowed
-    }
+    @ViewBuilder
+    private var stepContent: some View {
+        switch model.currentStep {
+        case .welcome:
+            WelcomeView(onGetStarted: { model.nextStep() })
 
-    private func permissionStatus(_ status: AVAuthorizationStatus) -> String {
-        switch status {
-        case .authorized: return "Allowed"
-        case .denied: return "Denied"
-        case .restricted: return "Restricted"
-        case .notDetermined: return "Required"
-        @unknown default: return "Unknown"
-        }
-    }
+        case .microphone:
+            PermissionRequestView(
+                icon: "mic.fill",
+                title: "Microphone Access",
+                description: "grabthis listens to your voice when you hold the fn key. Your audio is processed on-device for transcription.",
+                privacyNote: "Audio never leaves your Mac. We use Apple's Speech Recognition.",
+                isRequired: true,
+                onAllow: {
+                    Task {
+                        let granted = await model.requestMic()
+                        if !granted {
+                            // If not granted, open System Settings
+                            SystemSettingsDeepLinks.openMicrophone()
+                        }
+                        model.nextStep()
+                    }
+                },
+                onSkip: { model.nextStep() }
+            )
 
-    private func permissionStatus(_ status: SFSpeechRecognizerAuthorizationStatus) -> String {
-        switch status {
-        case .authorized: return "Allowed"
-        case .denied: return "Denied"
-        case .restricted: return "Restricted"
-        case .notDetermined: return "Required"
-        @unknown default: return "Unknown"
+        case .speechRecognition:
+            PermissionRequestView(
+                icon: "waveform",
+                title: "Speech Recognition",
+                description: "Convert your voice into text using Apple's on-device speech recognition engine.",
+                privacyNote: "Transcription happens locally on your Mac.",
+                isRequired: true,
+                onAllow: {
+                    Task {
+                        let granted = await model.requestSpeech()
+                        if !granted {
+                            // If not granted, open System Settings
+                            SystemSettingsDeepLinks.openSpeechRecognition()
+                        }
+                        model.nextStep()
+                    }
+                },
+                onSkip: { model.nextStep() }
+            )
+
+        case .screenRecording:
+            // Screen Recording has special handling - show different UI based on permission state
+            if model.screenRecordingAllowed {
+                // Already granted - show success view
+                ScreenRecordingGrantedView(onContinue: { model.nextStep() })
+            } else {
+                PermissionRequestView(
+                    icon: "rectangle.dashed.badge.record",
+                    title: "Screen Recording",
+                    description: "Capture the active window so AI can see what you're looking at and provide contextual answers.",
+                    privacyNote: "Screenshots are only taken when you activate grabthis.",
+                    isRequired: true,
+                    onAllow: {
+                        model.requestScreenRecording()
+                        // Don't auto-advance - user needs to grant in System Settings
+                    },
+                    onSkip: { model.nextStep() }
+                )
+                .overlay(alignment: .bottom) {
+                    // Extra guidance for Screen Recording
+                    VStack(spacing: 8) {
+                        Text("After enabling, you may need to quit & relaunch")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        HStack {
+                            Button("Refresh") { model.refresh() }
+                                .buttonStyle(.bordered)
+                            Button("Skip for now") { model.nextStep() }
+                                .buttonStyle(.bordered)
+                        }
+                    }
+                    .padding(.bottom, 100)
+                }
+            }
+
+        case .inputMonitoring:
+            PermissionRequestView(
+                icon: "keyboard",
+                title: "Input Monitoring",
+                description: "Detect when you press the fn key from anywhere on your Mac, even when grabthis isn't focused.",
+                privacyNote: "We only detect the fn key. No other keystrokes are monitored.",
+                isRequired: false,
+                onAllow: {
+                    model.openInputMonitoring()
+                    // Can't detect this permission, so just move on after a delay
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        model.nextStep()
+                    }
+                },
+                onSkip: { model.nextStep() }
+            )
+
+        case .accessibility:
+            PermissionRequestView(
+                icon: "hand.point.up.braille",
+                title: "Accessibility",
+                description: "Allow grabthis to automatically paste AI responses into the app you're using.",
+                privacyNote: "Used only for pasting text. No other actions are performed.",
+                isRequired: false,
+                onAllow: {
+                    model.requestAccessibility()
+                    model.nextStep()
+                },
+                onSkip: { model.nextStep() }
+            )
+
+        case .finished:
+            OnboardingFinishView(
+                onFinish: {
+                    model.markComplete()
+                    NSApp.keyWindow?.close()
+                },
+                onOpenSettings: {
+                    model.markComplete()
+                    // Keep window open but could open settings
+                    NSApp.keyWindow?.close()
+                    // Could add: openSettings()
+                }
+            )
         }
     }
 }
 
-// MARK: - Permission Card
+// MARK: - Legacy Permission Card (kept for Settings view)
 
-private struct PermissionCard: View {
+struct PermissionCard: View {
     let icon: String
     let title: String
     let description: String
@@ -197,30 +202,67 @@ private struct PermissionCard: View {
     }
 }
 
-// MARK: - Settings Card
+// MARK: - Screen Recording Granted View
 
-private struct SettingsCard: View {
-    @ObservedObject var appState: AppState
+/// Shown when screen recording permission is already granted
+private struct ScreenRecordingGrantedView: View {
+    let onContinue: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Settings")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
+        VStack(spacing: 28) {
+            Spacer()
 
-            Toggle(isOn: $appState.saveScreenshotsToHistory) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Save screenshots to History")
-                        .font(.subheadline)
-                    Text("Screenshots will be saved alongside transcripts")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+            // Success icon
+            Image(systemName: "rectangle.dashed.badge.record")
+                .font(.system(size: 56))
+                .foregroundStyle(
+                    LinearGradient(
+                        colors: [.green, .cyan],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .padding(.bottom, 8)
+
+            // Title with checkmark
+            VStack(spacing: 8) {
+                Text("Screen Recording")
+                    .font(.title)
+                    .fontWeight(.semibold)
+
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    Text("Enabled")
+                        .foregroundStyle(.green)
                 }
+                .font(.subheadline.weight(.medium))
             }
-            .toggleStyle(.switch)
+
+            Text("grabthis can now capture your screen to provide contextual AI answers.")
+                .font(.body)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 32)
+
+            Spacer()
+
+            // Continue button
+            Button(action: onContinue) {
+                Text("Continue")
+                    .font(.headline)
+                    .padding(.horizontal, 32)
+                    .padding(.vertical, 12)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .padding(.bottom, 32)
         }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.ultraThinMaterial)
     }
+}
+
+#Preview {
+    OnboardingView()
 }

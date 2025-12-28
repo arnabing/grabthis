@@ -5,6 +5,7 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var onboardingWindowController: NSWindowController?
+    private var settingsWindowController: NSWindowController?
     private var historyWindowController: NSWindowController?
     private let overlay = OverlayPanelController()
     private lazy var sessionController = SessionController(overlay: overlay)
@@ -62,7 +63,7 @@ private extension AppDelegate {
 
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "History…", action: #selector(openHistory), keyEquivalent: "h"))
-        menu.addItem(NSMenuItem(title: "Settings…", action: #selector(openOnboarding), keyEquivalent: ","))
+        menu.addItem(NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ","))
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(title: "Quit grabthis", action: #selector(quit), keyEquivalent: "q"))
         item.menu = menu
@@ -78,8 +79,24 @@ private extension AppDelegate {
     }
 
     @objc func openSettings() {
+        if settingsWindowController != nil {
+            settingsWindowController?.showWindow(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let view = SettingsView(appState: AppState.shared)
+        let hosting = NSHostingController(rootView: view)
+        let window = NSWindow(contentViewController: hosting)
+        window.title = "grabthis Settings"
+        window.setContentSize(NSSize(width: 400, height: 300))
+        window.styleMask = [.titled, .closable, .miniaturizable]
+        window.isReleasedWhenClosed = false
+
+        let wc = NSWindowController(window: window)
+        self.settingsWindowController = wc
+        wc.showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
-        NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
     }
 
     @objc func openOnboarding() {
@@ -91,7 +108,7 @@ private extension AppDelegate {
 
         let view = OnboardingView()
         let hosting = NSHostingController(rootView: view)
-        let window = NSWindow(contentViewController: hosting)
+        let window = OnboardingWindow(contentViewController: hosting)
         window.title = "grabthis Settings"
         window.setContentSize(NSSize(width: 440, height: 580))
         window.styleMask = [.titled, .closable, .miniaturizable]
@@ -158,6 +175,18 @@ private extension AppDelegate {
                 NSLog("grabthis capture test failed: %@", String(describing: error))
             }
         }
+    }
+}
+
+// MARK: - Onboarding Window
+
+/// Custom window that marks onboarding complete when closed
+final class OnboardingWindow: NSWindow {
+    override func close() {
+        // Mark onboarding complete when user closes the window
+        // This prevents the onboarding from showing again on every launch
+        UserDefaults.standard.set(true, forKey: AppState.Keys.onboardingCompleted)
+        super.close()
     }
 }
 

@@ -29,6 +29,8 @@
 	<string>grabthis needs microphone access for push-to-talk voice prompts.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>grabthis uses speech recognition to transcribe your voice prompt.</string>
+	<key>NSAccessibilityUsageDescription</key>
+	<string>grabthis needs Accessibility access to auto-paste AI responses into your apps.</string>
 </dict>
 </plist>
 
