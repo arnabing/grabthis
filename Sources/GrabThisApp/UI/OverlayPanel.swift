@@ -504,7 +504,7 @@ private struct OverlayRootView: View {
                 notchContent
                     // v11 fix: No extra top padding (header is the spacer)
                     // Horizontal padding must be > corner radius to avoid clipping pulsing status dot
-                    .padding(.horizontal, model.isOpen ? cornerRadiusInsets.opened.top + 4 : 0)
+                    .padding(.horizontal, model.isOpen ? cornerRadiusInsets.opened.top + 8 : 0)
                     .padding(.bottom, model.isOpen ? 12 : 0)
                     .background(Color.black)
                     .clipShape(NotchShape(

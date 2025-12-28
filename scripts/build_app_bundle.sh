@@ -37,6 +37,21 @@ chmod +x "$MACOS_DIR/GrabThisApp"
 cp "$ROOT_DIR/Support/GrabThisApp-Info.plist" "$CONTENTS_DIR/Info.plist"
 printf "APPL????" > "$CONTENTS_DIR/PkgInfo"
 
+# Compile asset catalog (app icon)
+ASSETS_DIR="$ROOT_DIR/Sources/GrabThisApp/Assets.xcassets"
+if [[ -d "$ASSETS_DIR" ]]; then
+  echo "Compiling asset catalog…"
+  xcrun actool "$ASSETS_DIR" \
+    --compile "$RES_DIR" \
+    --platform macosx \
+    --minimum-deployment-target 14.0 \
+    --app-icon AppIcon \
+    --output-partial-info-plist "/tmp/grabthis-AssetCatalog-Info.plist" \
+    2>/dev/null || echo "Warning: actool failed, icon may not appear"
+fi
+# Clean up any stray plist from earlier builds
+rm -f "$CONTENTS_DIR/AssetCatalog-Info.plist"
+
 echo "Ad-hoc codesigning (required for some macOS privacy prompts)…"
 # IMPORTANT:
 # TCC permissions are tied to the app's designated requirement (bundle id + signing identity).
