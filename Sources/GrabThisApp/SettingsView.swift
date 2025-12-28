@@ -6,6 +6,7 @@ import SwiftUI
 
 enum SettingsSection: String, CaseIterable, Identifiable {
     case general = "General"
+    case media = "Media"
     case privacy = "Privacy"
     case about = "About"
 
@@ -14,6 +15,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .general: return "gearshape"
+        case .media: return "play.laptopcomputer"
         case .privacy: return "lock.shield"
         case .about: return "info.circle"
         }
@@ -44,7 +46,7 @@ struct SettingsView: View {
 
     var body: some View {
         NavigationSplitView {
-            // Sidebar
+            // Sidebar - system handles Liquid Glass automatically
             List(SettingsSection.allCases, selection: $selectedSection) { section in
                 Label(section.rawValue, systemImage: section.icon)
                     .tag(section)
@@ -52,13 +54,15 @@ struct SettingsView: View {
             .listStyle(.sidebar)
             .navigationSplitViewColumnWidth(min: 140, ideal: 160, max: 200)
         } detail: {
-            // Detail view based on selection
+            // Detail view - let system handle background
             switch selectedSection {
             case .general:
                 GeneralSettingsView(
                     appState: appState,
                     selectedEngine: $selectedEngine
                 )
+            case .media:
+                MediaSettingsView()
             case .privacy:
                 PrivacySettingsView(
                     micStatus: micStatus,
@@ -119,6 +123,64 @@ private struct GeneralSettingsView: View {
                     .foregroundStyle(.secondary)
             } header: {
                 Text("History")
+            }
+        }
+        .formStyle(.grouped)
+        .scrollDisabled(true)
+    }
+}
+
+// MARK: - Media Settings
+
+private struct MediaSettingsView: View {
+    @AppStorage("nowPlayingEnabled") private var nowPlayingEnabled: Bool = true
+    @ObservedObject private var nowPlaying = NowPlayingService.shared
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Show Now Playing", isOn: $nowPlayingEnabled.animation())
+
+                Text("Display music controls when Apple Music or Spotify is playing.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("Now Playing")
+            }
+
+            Section {
+                // Status indicator
+                HStack {
+                    Text("Status")
+                    Spacer()
+                    if nowPlaying.hasActivePlayer {
+                        Label(nowPlaying.isPlaying ? "Playing" : "Paused", systemImage: nowPlaying.isPlaying ? "play.fill" : "pause.fill")
+                            .foregroundStyle(.green)
+                    } else {
+                        Text("No media detected")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if nowPlaying.hasActivePlayer {
+                    HStack {
+                        Text("Track")
+                        Spacer()
+                        Text(nowPlaying.title)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+
+                    HStack {
+                        Text("Artist")
+                        Spacer()
+                        Text(nowPlaying.artist)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+            } header: {
+                Text("Debug Info")
             }
         }
         .formStyle(.grouped)

@@ -128,6 +128,17 @@ final class OverlayPanelController {
             return screen.safeAreaInsets.top > 0
         }
 
+        /// Dynamic width for closed notch - expands for Now Playing wings (boring.notch pattern)
+        var effectiveClosedWidth: CGFloat {
+            let baseWidth = closedNotchSize.width
+            // Expand for Now Playing wings when music is active
+            if mode == .idleChip && NowPlayingService.shared.hasActivePlayer && NowPlayingService.shared.isEnabled {
+                let wingSize = max(0, closedNotchSize.height - 12)  // Album art & visualizer size
+                return baseWidth + (2 * wingSize) + 20  // Both wings + padding
+            }
+            return baseWidth
+        }
+
         // Actions (wired by SessionController)
         var onSend: (() -> Void)?
         var onCopy: (() -> Void)?
@@ -488,6 +499,7 @@ private extension OverlayPanelController {
 
 private struct OverlayRootView: View {
     @ObservedObject var model: OverlayPanelController.Model
+    @ObservedObject var nowPlaying = NowPlayingService.shared
     @State private var hoverTask: Task<Void, Never>?
 
     private var topCornerRadius: CGFloat {
@@ -644,26 +656,51 @@ private struct OverlayRootView: View {
         case .hidden:
             EmptyView()
         case .idleChip:
-            NotchHeader(
-                model: model,
-                statusColor: .cyan,
-                statusText: "Hold fn to talk",
-                showPulse: false,
-                showCloseButton: model.isOpen,
-                rightContent: { EmptyView() }
-            )
+            // Show Now Playing peek-through if music is active and enabled, otherwise normal header
+            // Use Group + transition to smooth the switch between Now Playing and normal header
+            Group {
+                if nowPlaying.isEnabled && nowPlaying.hasActivePlayer && !model.isOpen {
+                    NowPlayingCompactView(
+                        service: nowPlaying,
+                        notchWidth: model.closedNotchSize.width  // Center notch gap
+                    )
+                    .frame(width: model.effectiveClosedWidth, height: model.closedNotchSize.height)
+                    .transition(.opacity.animation(.easeInOut(duration: 0.2)))
+                } else {
+                    NotchHeader(
+                        model: model,
+                        statusColor: .cyan,
+                        statusText: "Hold fn to talk",
+                        showPulse: false,
+                        showCloseButton: model.isOpen,
+                        rightContent: {
+                            // Show mini visualizer if music is playing and enabled
+                            if nowPlaying.isEnabled && nowPlaying.hasActivePlayer {
+                                AudioSpectrumView(isPlaying: .constant(nowPlaying.isPlaying))
+                                    .frame(width: 16, height: 14)
+                            }
+                        }
+                    )
+                    .transition(.opacity.animation(.easeInOut(duration: 0.2)))
+                }
+            }
         case .listening:
-            if model.hasPhysicalNotch && !model.isOpen {
-                ListeningSplitContent(model: model)
-            } else {
-                NotchHeader(
-                    model: model,
-                    statusColor: .cyan,
-                    statusText: "Listening...",
-                    showPulse: true,
-                    showCloseButton: false,
-                    rightContent: { EmptyView() }
-                )
+            // Use Group + transition for smooth switching between split and header views
+            Group {
+                if model.hasPhysicalNotch && !model.isOpen {
+                    ListeningSplitContent(model: model)
+                        .transition(.opacity.animation(.easeInOut(duration: 0.2)))
+                } else {
+                    NotchHeader(
+                        model: model,
+                        statusColor: .cyan,
+                        statusText: "Listening...",
+                        showPulse: true,
+                        showCloseButton: false,
+                        rightContent: { EmptyView() }
+                    )
+                    .transition(.opacity.animation(.easeInOut(duration: 0.2)))
+                }
             }
         case .review:
             NotchHeader(
@@ -778,7 +815,7 @@ private struct NotchHeader<RightContent: View>: View {
             }
         }
         .frame(height: model.isOpen ? max(24, model.closedNotchSize.height) : model.closedNotchSize.height)
-        .frame(maxWidth: model.isOpen ? .infinity : model.closedNotchSize.width - 20)
+        .frame(maxWidth: model.isOpen ? .infinity : model.effectiveClosedWidth - 20)
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: model.isOpen)
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: statusColor)
     }
@@ -902,23 +939,48 @@ private struct TranscriptActionsBody: View {
 
 private struct IdleBodyContent: View {
     @ObservedObject var model: OverlayPanelController.Model
+    @ObservedObject var nowPlaying = NowPlayingService.shared
 
     private var hasLastSession: Bool { !model.lastTranscript.isEmpty }
 
     var body: some View {
-        TranscriptActionsBody(
-            transcript: .constant(model.lastTranscript),  // Read-only for history
-            placeholderText: "Hold fn to start talking",
-            screenshot: model.lastScreenshot?.image,
-            showButtons: hasLastSession,
-            isEditable: false,
-            onExpandScreenshot: model.onExpandScreenshot,
-            onRemoveScreenshot: nil,  // Don't allow removing from history view
-            onInsert: model.onInsert,
-            onCopy: model.onCopy,
-            onSend: model.onSend,
-            aiResponse: model.lastAIResponse
-        )
+        VStack(spacing: 12) {
+            // Show Now Playing expanded view if music is active and enabled
+            if nowPlaying.isEnabled && nowPlaying.hasActivePlayer {
+                NowPlayingExpandedView(service: nowPlaying)
+
+                Divider()
+                    .background(Color.white.opacity(0.2))
+
+                // Compact hint
+                HStack {
+                    Image(systemName: "keyboard")
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.4))
+                    Text("Hold fn to talk")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.5))
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
+            } else {
+                // Original idle content
+                TranscriptActionsBody(
+                    transcript: .constant(model.lastTranscript),  // Read-only for history
+                    placeholderText: "Hold fn to start talking",
+                    screenshot: model.lastScreenshot?.image,
+                    showButtons: hasLastSession,
+                    isEditable: false,
+                    onExpandScreenshot: model.onExpandScreenshot,
+                    onRemoveScreenshot: nil,  // Don't allow removing from history view
+                    onInsert: model.onInsert,
+                    onCopy: model.onCopy,
+                    onSend: model.onSend,
+                    aiResponse: model.lastAIResponse
+                )
+            }
+        }
     }
 }
 

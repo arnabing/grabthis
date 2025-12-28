@@ -12,7 +12,10 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "GrabThisApp",
-            path: "Sources/GrabThisApp"
+            path: "Sources/GrabThisApp",
+            resources: [
+                .process("Assets.xcassets")
+            ]
         ),
     ]
 )
