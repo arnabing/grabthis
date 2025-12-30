@@ -111,22 +111,26 @@ final class SessionController: ObservableObject {
         levelTask?.cancel()
         levelTask = nil
 
-        // Auto-pause music during dictation (prevents Bluetooth HFP quality degradation)
-        let shouldAutoPause = UserDefaults.standard.object(forKey: "autoPauseMusicDuringDictation") as? Bool ?? true
-        if shouldAutoPause && NowPlayingService.shared.isPlaying {
-            Log.session.info("Auto-pausing music for dictation")
-            NowPlayingService.shared.togglePlayPause()
-            didPauseMusicForDictation = true
-        } else {
-            didPauseMusicForDictation = false
-        }
-
+        // STEP 1: Show UI immediately (before any async work)
         overlay.presentListening(
             appName: appContext?.appName ?? "Unknown",
             screenshot: nil,
             transcript: ""
         )
         phase = .listening
+
+        // STEP 2: Pause music AFTER UI is visible (async, non-blocking)
+        // This prevents the 1-2s delay caused by synchronous music control
+        let shouldAutoPause = UserDefaults.standard.object(forKey: "autoPauseMusicDuringDictation") as? Bool ?? true
+        if shouldAutoPause && NowPlayingService.shared.isPlaying {
+            didPauseMusicForDictation = true
+            Task { @MainActor in
+                Log.session.info("Auto-pausing music for dictation")
+                NowPlayingService.shared.togglePlayPause()
+            }
+        } else {
+            didPauseMusicForDictation = false
+        }
 
         Task { @MainActor in
             do {

@@ -195,6 +195,15 @@ final class SpeechAnalyzerTranscriptionEngine: ObservableObject, TranscriptionEn
                         Log.stt.info("final: len=\(self.finalText.count)")
                     }
                 }
+
+                // Stream ended naturally (not from user stop or error)
+                // This happens when Apple's DictationTranscriber times out (~30s of silence)
+                if self.stopRequestedAt == nil && self.state == .listening {
+                    Log.stt.warning("⚠️ DictationTranscriber stream ended unexpectedly (Apple inactivity timeout?) - dictation paused")
+                    // Don't change state - audio engine is still running
+                    // User can continue speaking and we'll keep listening
+                    // The finalText will contain what was captured so far
+                }
             } catch {
                 if self.stopRequestedAt != nil, !self.partialText.isEmpty {
                     self.finalText = self.finalText.isEmpty ? self.partialText : self.finalText

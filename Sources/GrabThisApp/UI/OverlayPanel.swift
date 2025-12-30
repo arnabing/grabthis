@@ -1008,25 +1008,39 @@ private struct TranscriptActionsBody: View {
             HStack(alignment: .top, spacing: 12) {
                 // Left: Transcript (editable in review mode)
                 VStack(alignment: .leading, spacing: 8) {
-                    // Use TextEditor in ALL modes to guarantee identical text positioning
-                    // (TextEditor and Text have different internal text offsets that cannot be matched)
-                    TextEditor(text: isEditable
-                        ? $transcript
-                        : .constant(transcript.isEmpty ? placeholderText : transcript)
-                    )
-                    .font(.body)
-                    .foregroundStyle(.white.opacity(
-                        transcript.isEmpty && !isEditable ? 0.5 : 0.9
-                    ))
-                    .scrollContentBackground(.hidden)
-                    .background(Color.white.opacity(0.05))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .frame(minHeight: 70, maxHeight: 120)
-                    .disabled(!isEditable)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(Color.white.opacity(isEditable ? 0.15 : 0), lineWidth: 1)
-                    )
+                    if isEditable {
+                        // Review mode: Editable TextEditor
+                        TextEditor(text: $transcript)
+                            .font(.body)
+                            .foregroundStyle(.white.opacity(0.9))
+                            .scrollContentBackground(.hidden)
+                            .background(Color.white.opacity(0.05))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .frame(minHeight: 70, maxHeight: 120)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(Color.white.opacity(0.15), lineWidth: 1)
+                            )
+                    } else {
+                        // Listening mode: Auto-scroll to follow live transcription
+                        ScrollViewReader { proxy in
+                            ScrollView(.vertical, showsIndicators: false) {
+                                VStack(spacing: 0) {
+                                    Text(transcript.isEmpty ? placeholderText : transcript)
+                                        .font(.body)
+                                        .foregroundStyle(.white.opacity(transcript.isEmpty ? 0.5 : 0.9))
+                                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                                    Color.clear.frame(height: 1).id("transcriptBottom")
+                                }
+                            }
+                            .background(Color.white.opacity(0.05))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .frame(minHeight: 70, maxHeight: 120)
+                            .onChange(of: transcript) { _, _ in
+                                proxy.scrollTo("transcriptBottom", anchor: .bottom)
+                            }
+                        }
+                    }
 
                     // Show AI response if available (for idle hover)
                     if let response = aiResponse, !response.isEmpty {

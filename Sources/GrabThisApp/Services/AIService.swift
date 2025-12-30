@@ -32,7 +32,7 @@ final class AIService {
         self.session = URLSession(configuration: config)
     }
 
-    /// Analyze a screenshot with a text prompt using Gemini 2.5 Flash
+    /// Analyze a screenshot with a text prompt using Gemini 3 Flash
     func analyze(screenshot: CGImage?, prompt: String) async throws -> String {
         // For single-turn, just use the new method with empty history
         return try await analyzeWithHistory(

@@ -319,12 +319,14 @@ final class NowPlayingService: ObservableObject {
             NotificationCenter.default.post(name: .nowPlayingDidChange, object: nil)
         }
 
-        // SONG CHANGE DETECTION - Trigger sneak peek on new song (boring.notch style)
-        // Only trigger if we're playing and the song actually changed
+        // SNEAK PEEK DETECTION - Trigger on new song OR playback resume
         let songChanged = (title != lastPeekTitle || artist != lastPeekArtist) && !title.isEmpty
-        if songChanged && isPlaying {
-            print("🎵 NowPlayingService: Song changed! '\(lastPeekTitle)' -> '\(title)' - posting .songDidChange")
-            logger.info("Song changed: '\(self.lastPeekTitle)' -> '\(self.title)' by \(self.artist)")
+        let playbackResumed = !oldIsPlaying && isPlaying && hasActivePlayer
+
+        if (songChanged && isPlaying) || playbackResumed {
+            let reason = songChanged ? "song changed" : "playback resumed"
+            print("🎵 NowPlayingService: Sneak peek (\(reason)) - '\(title)' by \(artist)")
+            logger.info("Sneak peek (\(reason)): '\(self.title)' by \(self.artist)")
             NotificationCenter.default.post(name: .songDidChange, object: nil)
         }
 
