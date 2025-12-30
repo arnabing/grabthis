@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/89a16caf-0667-4a8d-b0dd-752ee779a935" alt="GrabThis Demo" width="600"/>
+  <img src="https://github.com/user-attachments/assets/9885c17a-07ba-4fb8-978e-8f47f373ae2c" alt="GrabThis Demo" width="600"/>
 </p>
 
 <h1 align="center">GrabThis</h1>
@@ -147,5 +147,5 @@ MIT — Use it, fork it, make it yours.
 ---
 
 <p align="center">
-  Made with ❤️ and way too much coffee
+  Made with ❤️ by Arnab Raychaudhuri
 </p>
