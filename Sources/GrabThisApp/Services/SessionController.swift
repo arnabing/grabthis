@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Foundation
 import Combine
 
@@ -31,10 +32,17 @@ final class SessionController: ObservableObject {
     private var didSaveCurrentSession: Bool = false
     private var screenshotSentToAI: Bool = false
 
+    /// Track if we paused music for dictation (to resume after)
+    private var didPauseMusicForDictation: Bool = false
+
     /// Local tracking of conversation turns for multi-turn context
     private var conversationTurns: [ConversationTurn] = []
     /// Whether we're in a follow-up flow (continue existing session instead of starting new)
     private var isFollowUp: Bool = false
+
+    /// Debounce rapid fn key presses to prevent animation conflicts
+    private var lastStateChangeTime: Date = .distantPast
+    private let minStateChangeInterval: TimeInterval = 0.04  // 40ms minimum (reduced from 80ms for faster perceived response)
 
     init(overlay: OverlayPanelController) {
         self.overlay = overlay
@@ -55,6 +63,14 @@ final class SessionController: ObservableObject {
     }
 
     func begin() {
+        // Debounce rapid fn key presses to prevent animation conflicts
+        let now = Date()
+        guard now.timeIntervalSince(lastStateChangeTime) >= minStateChangeInterval else {
+            Log.session.info("begin() debounced - too rapid")
+            return
+        }
+        lastStateChangeTime = now
+
         // If in response mode AND notch is expanded, start voice follow-up
         // If notch is retracted (closed), start a new session instead
         if phase == .response && currentSessionId != nil && overlay.model.isOpen {
@@ -94,6 +110,16 @@ final class SessionController: ObservableObject {
         transcriptionTask = nil
         levelTask?.cancel()
         levelTask = nil
+
+        // Auto-pause music during dictation (prevents Bluetooth HFP quality degradation)
+        let shouldAutoPause = UserDefaults.standard.object(forKey: "autoPauseMusicDuringDictation") as? Bool ?? true
+        if shouldAutoPause && NowPlayingService.shared.isPlaying {
+            Log.session.info("Auto-pausing music for dictation")
+            NowPlayingService.shared.togglePlayPause()
+            didPauseMusicForDictation = true
+        } else {
+            didPauseMusicForDictation = false
+        }
 
         overlay.presentListening(
             appName: appContext?.appName ?? "Unknown",
@@ -157,6 +183,9 @@ final class SessionController: ObservableObject {
 
     func end() {
         guard phase == .listening else { return }
+
+        // Update debounce time to prevent rapid begin() after end()
+        lastStateChangeTime = Date()
 
         // If in follow-up mode, delegate to endFollowUp
         if isFollowUp {
@@ -237,6 +266,23 @@ final class SessionController: ObservableObject {
             // Persist the session to History (once).
             self.archiveCurrent(endReason: .completed)
 
+            // Auto-resume music if we paused it for dictation
+            // Delay 1.5s to give Bluetooth time to switch from HFP back to A2DP
+            // Then fade in volume for a smooth transition
+            if self.didPauseMusicForDictation && !NowPlayingService.shared.isPlaying {
+                Task { @MainActor in
+                    // Log audio device info for debugging Bluetooth codec
+                    Self.logAudioOutputInfo()
+
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)  // 1.5 seconds
+
+                    Log.session.info("Auto-resuming music after dictation (with fade-in)")
+                    Self.logAudioOutputInfo()  // Log again after delay
+                    NowPlayingService.shared.playWithFadeIn()  // Smooth fade-in
+                }
+                self.didPauseMusicForDictation = false
+            }
+
             // Show review overlay after paste attempt (non-activating).
             self.overlay.presentReview(
                 appName: self.appContext?.appName ?? "Unknown",
@@ -256,6 +302,18 @@ final class SessionController: ObservableObject {
         levelTask?.cancel()
         levelTask = nil
         targetPIDForInsert = nil
+
+        // Auto-resume music if we paused it for dictation
+        // Delay to give Bluetooth time to switch from HFP back to A2DP
+        if didPauseMusicForDictation && !NowPlayingService.shared.isPlaying {
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                Log.session.info("Auto-resuming music after cancel (with fade-in)")
+                NowPlayingService.shared.playWithFadeIn()
+            }
+            didPauseMusicForDictation = false
+        }
+
         phase = .idle
         overlay.presentIdleChip()
         Log.app.info("session cancel()")
@@ -374,6 +432,16 @@ final class SessionController: ObservableObject {
         overlay.model.followUpInputText = ""  // Clear text field
         overlay.model.isRecordingFollowUp = true  // Show recording state in UI
 
+        // Auto-pause music during dictation (prevents Bluetooth HFP quality degradation)
+        let shouldAutoPause = UserDefaults.standard.object(forKey: "autoPauseMusicDuringDictation") as? Bool ?? true
+        if shouldAutoPause && NowPlayingService.shared.isPlaying {
+            Log.session.info("Auto-pausing music for follow-up dictation")
+            NowPlayingService.shared.togglePlayPause()
+            didPauseMusicForDictation = true
+        } else {
+            didPauseMusicForDictation = false
+        }
+
         // Stay in response mode visually - just update the input area
         phase = .listening
 
@@ -421,6 +489,17 @@ final class SessionController: ObservableObject {
         levelTask?.cancel()
         levelTask = nil
         overlay.model.isRecordingFollowUp = false  // Stop recording state
+
+        // Auto-resume music if we paused it for dictation
+        // Delay to give Bluetooth time to switch from HFP back to A2DP
+        if didPauseMusicForDictation && !NowPlayingService.shared.isPlaying {
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                Log.session.info("Auto-resuming music after follow-up dictation (with fade-in)")
+                NowPlayingService.shared.playWithFadeIn()
+            }
+            didPauseMusicForDictation = false
+        }
 
         Task { @MainActor in
             await self.transcription.stopAndFinalize()
@@ -570,6 +649,30 @@ private extension SessionController {
         appContext = nil
         phase = .idle
         overlay.presentIdleChip()
+    }
+
+    /// Log audio output device info for debugging Bluetooth codec (A2DP vs HFP)
+    /// A2DP = 44.1kHz or 48kHz (high quality stereo)
+    /// HFP/SCO = 8kHz or 16kHz (low quality mono)
+    static func logAudioOutputInfo() {
+        let engine = AVAudioEngine()
+        let outputNode = engine.outputNode
+        let format = outputNode.outputFormat(forBus: 0)
+
+        let sampleRate = format.sampleRate
+        let channels = format.channelCount
+
+        // HFP typically uses 8000 or 16000 Hz; A2DP uses 44100 or 48000 Hz
+        let codecGuess: String
+        if sampleRate <= 16000 {
+            codecGuess = "HFP/SCO (low quality)"
+        } else if sampleRate >= 44100 {
+            codecGuess = "A2DP (high quality)"
+        } else {
+            codecGuess = "Unknown"
+        }
+
+        Log.session.info("🎧 Audio output: \(Int(sampleRate))Hz, \(channels)ch - likely \(codecGuess, privacy: .public)")
     }
 }
 

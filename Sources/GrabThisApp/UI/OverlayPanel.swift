@@ -5,18 +5,19 @@ import Combine
 // MARK: - Constants (from boring.notch)
 
 private let shadowPadding: CGFloat = 20
-private let openNotchSize: CGSize = .init(width: 640, height: 210)
-private let chatNotchSize: CGSize = .init(width: 640, height: 350)  // Taller for chat mode
+private let openNotchSize: CGSize = .init(width: 480, height: 210)
+private let chatNotchSize: CGSize = .init(width: 480, height: 350)  // Taller for chat mode
 private let windowSize: CGSize = .init(width: openNotchSize.width, height: chatNotchSize.height + shadowPadding)
 private let cornerRadiusInsets = (
     opened: (top: CGFloat(19), bottom: CGFloat(24)),
     closed: (top: CGFloat(6), bottom: CGFloat(14))
 )
 
-// Animation springs (from boring.notch)
-private let openAnimation = Animation.spring(response: 0.42, dampingFraction: 0.8, blendDuration: 0)
-private let closeAnimation = Animation.spring(response: 0.45, dampingFraction: 1.0, blendDuration: 0)
-private let animationSpring = Animation.interactiveSpring(response: 0.38, dampingFraction: 0.8, blendDuration: 0)
+// Animation springs - OPTIMIZED for faster perceived response
+// (Original boring.notch was 0.42/0.45 - felt sluggish when switching from Now Playing)
+private let openAnimation = Animation.spring(response: 0.22, dampingFraction: 0.85, blendDuration: 0)
+private let closeAnimation = Animation.spring(response: 0.25, dampingFraction: 1.0, blendDuration: 0)
+private let animationSpring = Animation.interactiveSpring(response: 0.20, dampingFraction: 0.85, blendDuration: 0)
 
 @MainActor
 private func getClosedNotchSize(screen: NSScreen? = nil) -> CGSize {
@@ -59,9 +60,14 @@ private class GrabThisWindow: NSPanel {
         level = .mainMenu + 3
         hasShadow = false
         appearance = NSAppearance(named: .darkAqua)
+
+        // Enable mouse handling for non-key panel (needed for tap gestures)
+        acceptsMouseMovedEvents = true
+        becomesKeyOnlyIfNeeded = true
     }
 
-    override var canBecomeKey: Bool { allowsKeyboardInput }
+    // Always allow key status so tap gestures work in the panel
+    override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 }
 
@@ -131,10 +137,12 @@ final class OverlayPanelController {
         /// Dynamic width for closed notch - expands for Now Playing wings (boring.notch pattern)
         var effectiveClosedWidth: CGFloat {
             let baseWidth = closedNotchSize.width
-            // Expand for Now Playing wings when music is active
+            // Expand for Now Playing album art wing when music is active
             if mode == .idleChip && NowPlayingService.shared.hasActivePlayer && NowPlayingService.shared.isEnabled {
-                let wingSize = max(0, closedNotchSize.height - 12)  // Album art & visualizer size
-                return baseWidth + (2 * wingSize) + 20  // Both wings + padding
+                // Album art (28) + shadow (4 each side) + gap (4) = 40 per wing
+                // Symmetric expansion for centered frame: 40 on each side = 80 total
+                let wingSize: CGFloat = 40
+                return baseWidth + (wingSize * 2)
             }
             return baseWidth
         }
@@ -149,6 +157,7 @@ final class OverlayPanelController {
         var onTextFollowUp: ((String) -> Void)?
         var onRemoveScreenshot: (() -> Void)?
         var onTranscriptEdit: ((String) -> Void)?
+        var onStartDictation: (() -> Void)?  // Tap mic icon to start dictation
 
         // Chat input state (for live transcription in text field)
         @Published var followUpInputText: String = ""
@@ -452,13 +461,10 @@ private extension OverlayPanelController {
         let work = DispatchWorkItem { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
-                // For review mode with transcript: retract instead of dismiss (like response mode)
-                // This lets the user hover back to continue editing
-                if self.model.mode == .review && !self.model.transcript.isEmpty {
-                    self.retractReview()
-                } else {
-                    self.presentIdleChip()
-                }
+                // Always go to idleChip after timeout
+                // Transcript is saved to history, user can access via Home tab
+                // This allows Now Playing wings to show after dictation
+                self.presentIdleChip()
             }
         }
         autoDismissWork = work
@@ -500,7 +506,14 @@ private extension OverlayPanelController {
 private struct OverlayRootView: View {
     @ObservedObject var model: OverlayPanelController.Model
     @ObservedObject var nowPlaying = NowPlayingService.shared
+    @ObservedObject var coordinator = NotchCoordinator.shared
     @State private var hoverTask: Task<Void, Never>?
+
+    // Temporary peek state (boring.notch style - shows briefly then hides)
+    @State private var showPeek: Bool = true
+    @State private var peekTask: Task<Void, Never>?
+    @State private var showInitialHint: Bool = true  // Show "Hold fn to talk" first on app start
+    @State private var lastTrackTitle: String = ""
 
     private var topCornerRadius: CGFloat {
         model.isOpen ? cornerRadiusInsets.opened.top : cornerRadiusInsets.closed.top
@@ -578,7 +591,8 @@ private struct OverlayRootView: View {
                     // boring.notch uses notchState for mode-triggered animations
                     .animation(model.isOpen ? openAnimation : closeAnimation, value: model.mode)
                     .animation(model.isOpen ? openAnimation : closeAnimation, value: model.isOpen)
-                    .contentShape(Rectangle())
+                    // Use background instead of contentShape for hover - contentShape blocks child button clicks
+                    .background(Color.black.opacity(0.001))
                     .onHover { hovering in
                         handleHover(hovering)
                     }
@@ -589,6 +603,9 @@ private struct OverlayRootView: View {
 
     private func handleHover(_ hovering: Bool) {
         hoverTask?.cancel()
+
+        // Notify coordinator of hover state change (handles auto-switch to Now Playing)
+        coordinator.onHover(hovering)
 
         if hovering {
             withAnimation(animationSpring) {
@@ -607,8 +624,9 @@ private struct OverlayRootView: View {
                 }
             }
         } else {
+            // Longer delay (300ms) to prevent accidental close when moving between elements
             hoverTask = Task {
-                try? await Task.sleep(for: .milliseconds(100))
+                try? await Task.sleep(for: .milliseconds(300))
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
                     withAnimation(animationSpring) {
@@ -631,10 +649,21 @@ private struct OverlayRootView: View {
     private var notchContent: some View {
         // boring.notch pattern: header is ALWAYS present, body is ADDED when open
         // This ensures transitions fire correctly on every open/close cycle
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .center, spacing: 0) {
             // HEADER - always present, content varies by state
             headerContent
                 .zIndex(2)
+
+            // UNDER-NOTCH PEEK - shows track name or hint briefly when closed (boring.notch style)
+            // Show on: initial hint OR coordinator.showSneakPeek (song change)
+            if !model.isOpen && model.mode == .idleChip && (showPeek || coordinator.showSneakPeek) {
+                underNotchPeek
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .zIndex(1)
+                    .onAppear {
+                        schedulePeekHide()
+                    }
+            }
 
             // BODY - only when open, this gets the transition
             if model.isOpen {
@@ -649,6 +678,60 @@ private struct OverlayRootView: View {
         }
     }
 
+    /// Schedule the peek to hide after a delay (boring.notch behavior)
+    private func schedulePeekHide() {
+        peekTask?.cancel()
+        peekTask = Task {
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                withAnimation(.easeInOut(duration: 0.3)) {
+                    showPeek = false
+                    // Also clear coordinator's sneak peek flag to fully dismiss
+                    coordinator.showSneakPeek = false
+                }
+                // After initial hint hides, future shows will display track name
+                if showInitialHint {
+                    showInitialHint = false
+                }
+            }
+        }
+    }
+
+    /// Under-notch peek text (boring.notch style) - shows "Hold fn to talk" first, then track name on song change
+    @ViewBuilder
+    private var underNotchPeek: some View {
+        let peekText: String = {
+            // On song change (sneak peek), always show track info
+            if coordinator.showSneakPeek && nowPlaying.hasActivePlayer && !nowPlaying.title.isEmpty {
+                let artistText = nowPlaying.artist.isEmpty ? "" : " – \(nowPlaying.artist)"
+                return "\(nowPlaying.title)\(artistText)"
+            }
+            // Initial hint on app start
+            if showInitialHint {
+                return "Hold fn to talk"
+            }
+            // After initial hint dismissed, show track name if music playing
+            if nowPlaying.isEnabled && nowPlaying.hasActivePlayer && !nowPlaying.title.isEmpty {
+                return nowPlaying.title
+            }
+            // Fallback
+            return "Hold fn to talk"
+        }()
+
+        Text(peekText)
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(.white.opacity(0.7))
+            .lineLimit(1)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 5)
+            .background(
+                Capsule()
+                    .fill(Color.black)
+            )
+            .padding(.top, 4)
+    }
+
     @ViewBuilder
     private var headerContent: some View {
         // Header row - always present at notch height, content changes based on state
@@ -660,11 +743,14 @@ private struct OverlayRootView: View {
             // Use Group + transition to smooth the switch between Now Playing and normal header
             Group {
                 if nowPlaying.isEnabled && nowPlaying.hasActivePlayer && !model.isOpen {
+                    // Show Now Playing wings with iOS 26 morph (album art → mic when dictating)
                     NowPlayingCompactView(
                         service: nowPlaying,
-                        notchWidth: model.closedNotchSize.width  // Center notch gap
+                        notchWidth: model.closedNotchSize.width,
+                        isDictating: model.mode == .listening
                     )
                     .frame(width: model.effectiveClosedWidth, height: model.closedNotchSize.height)
+                    .allowsHitTesting(true)  // Ensure controls receive touch events
                     .transition(.opacity.animation(.easeInOut(duration: 0.2)))
                 } else {
                     NotchHeader(
@@ -676,7 +762,7 @@ private struct OverlayRootView: View {
                         rightContent: {
                             // Show mini visualizer if music is playing and enabled
                             if nowPlaying.isEnabled && nowPlaying.hasActivePlayer {
-                                AudioSpectrumView(isPlaying: .constant(nowPlaying.isPlaying))
+                                AudioSpectrumView(isPlaying: nowPlaying.isPlaying)  // Fixed: was .constant()
                                     .frame(width: 16, height: 14)
                             }
                         }
@@ -821,6 +907,82 @@ private struct NotchHeader<RightContent: View>: View {
     }
 }
 
+// MARK: - Tab Bar (boring.notch style - only shown in open notch header)
+
+private struct NotchTabBar: View {
+    @Binding var currentPage: NotchPage
+    @ObservedObject var nowPlaying = NowPlayingService.shared
+    @Namespace private var tabAnimation
+
+    private var availablePages: [NotchPage] {
+        var pages: [NotchPage] = [.transcription]  // Dictation tab always available
+        if nowPlaying.hasActivePlayer && nowPlaying.isEnabled {
+            pages.append(.nowPlaying)
+        }
+        return pages
+    }
+
+    var body: some View {
+        // Centered segmented control style (iOS standard pattern)
+        HStack(spacing: 2) {
+            ForEach(availablePages, id: \.self) { page in
+                NotchTabButton(
+                    page: page,
+                    isSelected: currentPage == page,
+                    namespace: tabAnimation
+                )
+                .onTapGesture {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                        currentPage = page
+                    }
+                }
+            }
+        }
+        .padding(3)
+        .background(
+            Capsule()
+                .fill(Color.white.opacity(0.08))
+        )
+        .frame(maxWidth: .infinity, alignment: .center)  // Center under notch
+    }
+}
+
+private struct NotchTabButton: View {
+    let page: NotchPage
+    let isSelected: Bool
+    var namespace: Namespace.ID
+
+    // Short labels for tabs
+    private var label: String {
+        switch page {
+        case .transcription: return "Voice AI"
+        case .nowPlaying: return "Now Playing"
+        case .history: return "History"
+        case .settings: return "Settings"
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: page.icon)
+                .font(.system(size: 11, weight: .medium))
+            Text(label)
+                .font(.system(size: 11, weight: .medium))
+        }
+        .foregroundStyle(isSelected ? .white : .white.opacity(0.5))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background {
+            if isSelected {
+                Capsule()
+                    .fill(Color.white.opacity(0.18))
+                    .matchedGeometryEffect(id: "tabBackground", in: namespace)
+            }
+        }
+        .contentShape(Capsule())
+    }
+}
+
 // MARK: - Body Content Views (only shown when open)
 
 /// Shared component for transcript display with thumbnail and action buttons.
@@ -859,7 +1021,7 @@ private struct TranscriptActionsBody: View {
                     .scrollContentBackground(.hidden)
                     .background(Color.white.opacity(0.05))
                     .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .frame(minHeight: 60, maxHeight: 100)
+                    .frame(minHeight: 70, maxHeight: 120)
                     .disabled(!isEditable)
                     .overlay(
                         RoundedRectangle(cornerRadius: 8)
@@ -885,7 +1047,7 @@ private struct TranscriptActionsBody: View {
                     .transition(.opacity.combined(with: .scale(scale: 0.8)))
                 }
             }
-            .frame(height: 100)  // Fixed height ensures consistent layout in all modes
+            .frame(height: 120)  // Fixed height ensures consistent layout in all modes
 
             // Always use spacer to push content to top
             Spacer()
@@ -940,43 +1102,45 @@ private struct TranscriptActionsBody: View {
 private struct IdleBodyContent: View {
     @ObservedObject var model: OverlayPanelController.Model
     @ObservedObject var nowPlaying = NowPlayingService.shared
+    @ObservedObject var coordinator = NotchCoordinator.shared
 
     private var hasLastSession: Bool { !model.lastTranscript.isEmpty }
+    private var hasMusic: Bool { nowPlaying.isEnabled && nowPlaying.hasActivePlayer }
 
     var body: some View {
-        VStack(spacing: 12) {
-            // Show Now Playing expanded view if music is active and enabled
-            if nowPlaying.isEnabled && nowPlaying.hasActivePlayer {
-                NowPlayingExpandedView(service: nowPlaying)
+        VStack(spacing: 8) {
+            // Tab bar only when music is available (switch between dictation and now playing)
+            if hasMusic {
+                NotchTabBar(currentPage: $coordinator.currentPage)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 4)
+            }
 
-                Divider()
-                    .background(Color.white.opacity(0.2))
-
-                // Compact hint
-                HStack {
-                    Image(systemName: "keyboard")
-                        .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.4))
-                    Text("Hold fn to talk")
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.5))
-                    Spacer()
+            // Content based on selected page
+            switch coordinator.currentPage {
+            case .nowPlaying where hasMusic:
+                // Now Playing expanded view
+                NowPlayingExpandedView(service: nowPlaying) { hovering in
+                    if hovering {
+                        model.isHovering = true
+                    }
                 }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 8)
-            } else {
-                // Original idle content
+                .allowsHitTesting(true)
+
+            default:
+                // Dictation tab: show history if available, otherwise "Hold fn to talk"
                 TranscriptActionsBody(
-                    transcript: .constant(model.lastTranscript),  // Read-only for history
+                    transcript: .constant(model.lastTranscript),
                     placeholderText: "Hold fn to start talking",
                     screenshot: model.lastScreenshot?.image,
                     showButtons: hasLastSession,
                     isEditable: false,
                     onExpandScreenshot: model.onExpandScreenshot,
-                    onRemoveScreenshot: nil,  // Don't allow removing from history view
+                    onRemoveScreenshot: nil,
                     onInsert: model.onInsert,
                     onCopy: model.onCopy,
                     onSend: model.onSend,
+                    onHover: { model.isHovering = $0 },
                     aiResponse: model.lastAIResponse
                 )
             }

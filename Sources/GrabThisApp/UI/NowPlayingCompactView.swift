@@ -3,7 +3,7 @@
 //  GrabThisApp
 //
 //  Compact Now Playing view for closed notch state (peek-through design)
-//  Shows album art on left, visualizer on right
+//  Shows album art on left side of notch
 //
 
 import SwiftUI
@@ -11,25 +11,53 @@ import SwiftUI
 struct NowPlayingCompactView: View {
     @ObservedObject var service: NowPlayingService
     let notchWidth: CGFloat
+    var isDictating: Bool = false  // iOS 26 style: morph album art to mic when dictating
+
+    // Wing size matches effectiveClosedWidth calculation in OverlayPanelController.Model
+    // 28px album art + 4px shadow on each side + 4px gap = 40px
+    private let wingSize: CGFloat = 40
 
     var body: some View {
         HStack(spacing: 0) {
-            // Left peek: Album art
+            // Left wing: Album art centered (room for shadow on both sides)
             leftPeek
+                .frame(width: wingSize)
 
             // Center: Notch gap (invisible spacer)
             Spacer()
                 .frame(width: notchWidth)
 
-            // Right peek: Visualizer
+            // Right wing: Visualizer
             rightPeek
+                .frame(width: wingSize)
         }
+        .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isDictating)
     }
 
-    // MARK: - Left Peek (Album Art)
+    // MARK: - Right Peek (Visualizer)
+    private var rightPeek: some View {
+        AudioSpectrumView(isPlaying: service.isPlaying)  // Fixed: was .constant() which didn't update
+            .frame(width: 20, height: 16)
+            .onTapGesture {
+                service.togglePlayPause()
+            }
+    }
+
+    // MARK: - Left Peek (Album Art OR Mic - iOS 26 morph)
     private var leftPeek: some View {
         Group {
-            if let art = service.albumArt {
+            if isDictating {
+                // iOS 26 style: Show mic icon when dictating (morphs from album art)
+                Circle()
+                    .fill(Color.red.opacity(0.85))
+                    .frame(width: 28, height: 28)
+                    .overlay(
+                        Image(systemName: "mic.fill")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(.white)
+                    )
+                    .shadow(color: Color.red.opacity(0.4), radius: 4, x: 0, y: 0)
+            } else if let art = service.albumArt {
                 Image(nsImage: art)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
@@ -37,7 +65,7 @@ struct NowPlayingCompactView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 4))
                     .shadow(color: Color(nsColor: service.dominantColor).opacity(0.5), radius: 4, x: 0, y: 0)
             } else {
-                // Placeholder when no artwork
+                // Placeholder when no artwork and not dictating
                 RoundedRectangle(cornerRadius: 4)
                     .fill(Color.white.opacity(0.1))
                     .frame(width: 28, height: 28)
@@ -49,17 +77,10 @@ struct NowPlayingCompactView: View {
             }
         }
         .onTapGesture {
-            service.togglePlayPause()
-        }
-    }
-
-    // MARK: - Right Peek (Visualizer)
-    private var rightPeek: some View {
-        AudioSpectrumView(isPlaying: .constant(service.isPlaying))
-            .frame(width: 16, height: 14)
-            .onTapGesture {
+            if !isDictating {
                 service.togglePlayPause()
             }
+        }
     }
 }
 
@@ -129,7 +150,7 @@ struct NowPlayingCompactFullView: View {
             }
 
             // Visualizer
-            AudioSpectrumView(isPlaying: .constant(service.isPlaying))
+            AudioSpectrumView(isPlaying: service.isPlaying)  // Fixed: was .constant()
                 .frame(width: 16, height: 14)
         }
         .padding(.horizontal, 8)

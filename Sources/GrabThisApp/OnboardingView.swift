@@ -18,7 +18,42 @@ struct OnboardingView: View {
         }
         .frame(width: 440, height: 520)
         .background(.ultraThinMaterial)
-        .onAppear { model.refresh() }
+        .onAppear {
+            model.refresh()
+        }
+        // Auto-skip already granted permissions
+        .onChange(of: model.currentStep) { _, newStep in
+            autoSkipIfGranted(step: newStep)
+        }
+    }
+
+    /// Auto-advance past steps where permission is already granted
+    private func autoSkipIfGranted(step: OnboardingStep) {
+        // Small delay to show the transition, then skip if granted
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            model.refresh()  // Ensure latest state
+
+            switch step {
+            case .microphone:
+                if model.micStatus == .authorized {
+                    model.nextStep()
+                }
+            case .speechRecognition:
+                if model.speechStatus == .authorized {
+                    model.nextStep()
+                }
+            case .screenRecording:
+                if model.screenRecordingAllowed {
+                    model.nextStep()
+                }
+            case .accessibility:
+                if model.accessibilityTrusted {
+                    model.nextStep()
+                }
+            default:
+                break
+            }
+        }
     }
 
     @ViewBuilder
@@ -40,11 +75,14 @@ struct OnboardingView: View {
                         if !granted {
                             // If not granted, open System Settings
                             SystemSettingsDeepLinks.openMicrophone()
+                        } else {
+                            model.nextStep()
                         }
-                        model.nextStep()
                     }
                 },
-                onSkip: { model.nextStep() }
+                onSkip: { model.nextStep() },
+                buttonText: "Allow Microphone",
+                showInstructions: false  // System dialog handles this
             )
 
         case .speechRecognition:
@@ -60,11 +98,14 @@ struct OnboardingView: View {
                         if !granted {
                             // If not granted, open System Settings
                             SystemSettingsDeepLinks.openSpeechRecognition()
+                        } else {
+                            model.nextStep()
                         }
-                        model.nextStep()
                     }
                 },
-                onSkip: { model.nextStep() }
+                onSkip: { model.nextStep() },
+                buttonText: "Allow Speech",
+                showInstructions: false  // System dialog handles this
             )
 
         case .screenRecording:
@@ -83,22 +124,25 @@ struct OnboardingView: View {
                         model.requestScreenRecording()
                         // Don't auto-advance - user needs to grant in System Settings
                     },
-                    onSkip: { model.nextStep() }
+                    onSkip: { model.nextStep() },
+                    buttonText: "Open Settings"
                 )
                 .overlay(alignment: .bottom) {
                     // Extra guidance for Screen Recording
                     VStack(spacing: 8) {
-                        Text("After enabling, you may need to quit & relaunch")
+                        Text("After enabling, you may need to quit & relaunch grabthis")
                             .font(.caption)
-                            .foregroundStyle(.secondary)
-                        HStack {
-                            Button("Refresh") { model.refresh() }
-                                .buttonStyle(.bordered)
-                            Button("Skip for now") { model.nextStep() }
+                            .foregroundStyle(.orange)
+                        HStack(spacing: 12) {
+                            Button(action: { model.refresh() }) {
+                                Label("Check Again", systemImage: "arrow.clockwise")
+                            }
+                            .buttonStyle(.bordered)
+                            Button("Continue →") { model.nextStep() }
                                 .buttonStyle(.bordered)
                         }
                     }
-                    .padding(.bottom, 100)
+                    .padding(.bottom, 90)
                 }
             }
 
@@ -116,7 +160,8 @@ struct OnboardingView: View {
                         model.nextStep()
                     }
                 },
-                onSkip: { model.nextStep() }
+                onSkip: { model.nextStep() },
+                buttonText: "Open Settings"
             )
 
         case .accessibility:
@@ -128,9 +173,13 @@ struct OnboardingView: View {
                 isRequired: false,
                 onAllow: {
                     model.requestAccessibility()
-                    model.nextStep()
+                    // Small delay so user sees the system prompt
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        model.nextStep()
+                    }
                 },
-                onSkip: { model.nextStep() }
+                onSkip: { model.nextStep() },
+                buttonText: "Open Settings"
             )
 
         case .finished:

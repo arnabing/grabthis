@@ -4,11 +4,15 @@ import Speech
 
 /// Modern SpeechAnalyzer-based transcription engine (macOS 26+).
 /// Uses on-device DictationTranscriber for fast, private transcription with punctuation.
+@available(macOS 26, *)
 @MainActor
 final class SpeechAnalyzerTranscriptionEngine: ObservableObject, TranscriptionEngine {
     @Published private(set) var state: TranscriptionState = .idle
     @Published private(set) var partialText: String = ""
     @Published private(set) var finalText: String = ""
+
+    /// Track the longest partial to prevent regression during re-evaluation
+    private var longestPartialSeen: String = ""
 
     private var analyzer: SpeechAnalyzer?
     private var transcriber: DictationTranscriber?
@@ -91,6 +95,7 @@ final class SpeechAnalyzerTranscriptionEngine: ObservableObject, TranscriptionEn
 
         partialText = ""
         finalText = ""
+        longestPartialSeen = ""
         stopRequestedAt = nil
 
         // Create DictationTranscriber for notes/messages with automatic punctuation
@@ -173,15 +178,21 @@ final class SpeechAnalyzerTranscriptionEngine: ObservableObject, TranscriptionEn
 
                     // Convert AttributedString to plain String
                     let text = String(result.text.characters)
-                    self.partialText = text
-                    Log.stt.debug("partial: \(text, privacy: .public)")
+
+                    // Prevent regression: only update if we have more text than before
+                    if text.count >= self.longestPartialSeen.count {
+                        self.partialText = text
+                        self.longestPartialSeen = text
+                    }
+
+                    Log.stt.debug("partial: \(self.partialText.suffix(50), privacy: .public) (len=\(self.partialText.count))")
 
                     if result.isFinal {
-                        self.finalText = text
+                        self.finalText = self.longestPartialSeen.isEmpty ? text : self.longestPartialSeen
                         if self.stopRequestedAt != nil {
                             self.state = .stopped
                         }
-                        Log.stt.info("final: \(text, privacy: .public)")
+                        Log.stt.info("final: len=\(self.finalText.count)")
                     }
                 }
             } catch {
@@ -208,9 +219,15 @@ final class SpeechAnalyzerTranscriptionEngine: ObservableObject, TranscriptionEn
             try? await Task.sleep(nanoseconds: tailNanoseconds)
         }
 
-        // Stop audio input
+        // Stop audio input IMMEDIATELY to release microphone
+        // This helps Bluetooth switch from HFP back to A2DP faster
         audioEngine.stop()
         audioEngine.inputNode.removeTap(onBus: 0)
+
+        // Release audio resources immediately (helps Bluetooth audio quality recovery)
+        self.audioConverter = nil
+        self.audioEngine = nil
+        Log.stt.info("🎧 Audio engine released - Bluetooth should recover to A2DP")
 
         // Finish the input stream
         inputContinuation?.finish()
@@ -227,18 +244,17 @@ final class SpeechAnalyzerTranscriptionEngine: ObservableObject, TranscriptionEn
             try? await Task.sleep(nanoseconds: 35_000_000)
         }
 
-        // Cleanup
+        // Cleanup remaining resources
         transcriptionTask?.cancel()
         transcriptionTask = nil
         analyzerTask?.cancel()
         analyzerTask = nil
         self.analyzer = nil
         self.transcriber = nil
-        self.audioEngine = nil
 
-        // Prefer final, otherwise keep the best partial
+        // Prefer final, otherwise keep the longest partial we saw
         if finalText.isEmpty {
-            finalText = partialText
+            finalText = longestPartialSeen.isEmpty ? partialText : longestPartialSeen
         }
 
         if case .error(let message) = state, !finalText.isEmpty {
@@ -259,12 +275,14 @@ final class SpeechAnalyzerTranscriptionEngine: ObservableObject, TranscriptionEn
         }
         partialText = ""
         finalText = ""
+        longestPartialSeen = ""
         state = .idle
     }
 }
 
 // MARK: - Audio Processing
 
+@available(macOS 26, *)
 private extension SpeechAnalyzerTranscriptionEngine {
     nonisolated static func makeTapBlock(
         continuation: AsyncStream<AnalyzerInput>.Continuation,

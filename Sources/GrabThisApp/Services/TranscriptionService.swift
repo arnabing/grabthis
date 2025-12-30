@@ -36,13 +36,14 @@ final class TranscriptionService: ObservableObject {
     init(locale: Locale = .current) {
         self.locale = locale
 
-        // Load saved preference or default to SFSpeech (stable, cloud-based)
-        // SpeechAnalyzer (on-device) is opt-in due to macOS 26 beta instability
+        // Load saved preference, validating it's available on this macOS version
         if let saved = UserDefaults.standard.string(forKey: "sttEngineType"),
-           let type = TranscriptionEngineType(rawValue: saved) {
+           let type = TranscriptionEngineType(rawValue: saved),
+           type.isAvailable {
             self.engineType = type
         } else {
-            self.engineType = .speechAnalyzer
+            // Default to best available engine (SpeechAnalyzer on 26+, SFSpeech otherwise)
+            self.engineType = TranscriptionEngineType.availableCases.first ?? .sfSpeech
         }
 
         recreateEngine()
@@ -88,17 +89,25 @@ final class TranscriptionService: ObservableObject {
 
     /// Check if the SpeechAnalyzer model is available for the current locale.
     func isSpeechAnalyzerModelAvailable() async -> Bool {
-        await SpeechAnalyzerTranscriptionEngine.isModelAvailable(for: locale)
+        if #available(macOS 26, *) {
+            return await SpeechAnalyzerTranscriptionEngine.isModelAvailable(for: locale)
+        }
+        return false
     }
 
     /// Download the SpeechAnalyzer model for the current locale.
     func downloadSpeechAnalyzerModel() async throws {
-        try await SpeechAnalyzerTranscriptionEngine.downloadModel(for: locale)
+        if #available(macOS 26, *) {
+            try await SpeechAnalyzerTranscriptionEngine.downloadModel(for: locale)
+        }
     }
 
     /// Get download progress stream for the SpeechAnalyzer model.
     func speechAnalyzerModelDownloadProgress() -> AsyncStream<Double> {
-        SpeechAnalyzerTranscriptionEngine.downloadProgress(for: locale)
+        if #available(macOS 26, *) {
+            return SpeechAnalyzerTranscriptionEngine.downloadProgress(for: locale)
+        }
+        return AsyncStream { $0.finish() }
     }
 
     private func recreateEngine() {
@@ -113,16 +122,25 @@ final class TranscriptionService: ObservableObject {
         // Create engine based on type
         switch engineType {
         case .speechAnalyzer:
-            let speechAnalyzerEngine = SpeechAnalyzerTranscriptionEngine(locale: locale)
-            bindEngine(speechAnalyzerEngine)
-            engine = speechAnalyzerEngine
-            Log.stt.notice("🎤 ENGINE ACTIVE: SpeechAnalyzer (on-device, fast)")
+            if #available(macOS 26, *) {
+                let speechAnalyzerEngine = SpeechAnalyzerTranscriptionEngine(locale: locale)
+                bindEngine(speechAnalyzerEngine)
+                engine = speechAnalyzerEngine
+                Log.stt.notice("ENGINE ACTIVE: SpeechAnalyzer (on-device, fast)")
+            } else {
+                // Fallback to SFSpeech if SpeechAnalyzer not available
+                Log.stt.warning("SpeechAnalyzer requires macOS 26+, falling back to SFSpeech")
+                let sfEngine = SFSpeechTranscriptionEngine(locale: locale)
+                bindEngine(sfEngine)
+                engine = sfEngine
+                Log.stt.notice("ENGINE ACTIVE: SFSpeech (cloud-based) - fallback")
+            }
 
         case .sfSpeech:
             let sfEngine = SFSpeechTranscriptionEngine(locale: locale)
             bindEngine(sfEngine)
             engine = sfEngine
-            Log.stt.notice("🎤 ENGINE ACTIVE: SFSpeech (cloud-based)")
+            Log.stt.notice("ENGINE ACTIVE: SFSpeech (cloud-based)")
         }
     }
 

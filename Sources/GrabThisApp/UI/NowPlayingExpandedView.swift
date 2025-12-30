@@ -8,152 +8,166 @@
 
 import SwiftUI
 
+// Simple file-based debug logging
+private func debugLog(_ message: String) {
+    let logPath = "/tmp/grabthis_debug.log"
+    let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+    let line = "[\(timestamp)] \(message)\n"
+    if let handle = FileHandle(forWritingAtPath: logPath) {
+        handle.seekToEndOfFile()
+        handle.write(line.data(using: .utf8)!)
+        handle.closeFile()
+    } else {
+        FileManager.default.createFile(atPath: logPath, contents: line.data(using: .utf8))
+    }
+}
+
 struct NowPlayingExpandedView: View {
     @ObservedObject var service: NowPlayingService
+    var onHover: ((Bool) -> Void)? = nil  // Callback to keep parent notch open
     @State private var isDraggingProgress: Bool = false
     @State private var dragProgress: Double = 0
+    @State private var isHovering: Bool = false
 
     var body: some View {
-        VStack(spacing: 12) {
-            // Header with visualizer
-            headerWithVisualizer
+        HStack(alignment: .center, spacing: 0) {
+            // Album art LEFT-justified
+            albumArtView
+                .padding(.leading, 14)
 
-            // Main content: Album art + Track info
-            HStack(alignment: .top, spacing: 16) {
-                albumArtView
+            // Title/Controls/Progress CENTERED in remaining space (under notch)
+            VStack(alignment: .center, spacing: 6) {
                 trackInfoView
+
+                Spacer(minLength: 0)
+
+                // Controls row (simplified: prev, play/pause, next only)
+                controlsRow
+
+                Spacer(minLength: 0)
+
+                // Progress bar at bottom (compact)
+                progressBarView
             }
-
-            // Progress bar with seek
-            progressBarView
-
-            // Controls row
-            controlsRow
+            .frame(maxWidth: .infinity, maxHeight: 100)  // Fill remaining space, centered
+            .padding(.trailing, 14)
         }
-        .padding(16)
+        .padding(.vertical, 10)
+        .background(
+            // Use background for hover detection instead of contentShape
+            // contentShape was blocking button clicks
+            Color.black.opacity(0.001)
+                .onHover { hovering in
+                    isHovering = hovering
+                    onHover?(hovering)
+                }
+        )
+        .onAppear {
+            debugLog("NowPlayingExpandedView appeared - controls should be visible")
+        }
     }
 
-    // MARK: - Header with Visualizer
-    private var headerWithVisualizer: some View {
-        HStack {
-            Spacer()
-            AudioSpectrumView(isPlaying: .constant(service.isPlaying))
-                .frame(width: 20, height: 16)
-        }
-    }
-
-    // MARK: - Album Art
+    // MARK: - Album Art (THE VISUAL FOCUS - maximized)
     private var albumArtView: some View {
         Group {
             if let art = service.albumArt {
                 Image(nsImage: art)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
-                    .frame(width: 80, height: 80)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .frame(width: 100, height: 100)  // Maximized to fill available space
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
                     .shadow(color: Color(nsColor: service.dominantColor).opacity(0.4), radius: 12, x: 0, y: 4)
             } else {
-                RoundedRectangle(cornerRadius: 8)
+                RoundedRectangle(cornerRadius: 14)
                     .fill(Color.white.opacity(0.1))
-                    .frame(width: 80, height: 80)
+                    .frame(width: 100, height: 100)
                     .overlay(
                         Image(systemName: "music.note")
-                            .font(.system(size: 28))
+                            .font(.system(size: 32))
                             .foregroundStyle(.white.opacity(0.5))
                     )
             }
         }
     }
 
-    // MARK: - Track Info
+    // MARK: - Track Info (centered)
     private var trackInfoView: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .center, spacing: 2) {
             // Title
             Text(service.title.isEmpty ? "Not Playing" : service.title)
-                .font(.system(size: 16, weight: .semibold))
+                .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(.white)
-                .lineLimit(2)
+                .lineLimit(1)
 
             // Artist
             Text(service.artist.isEmpty ? "Unknown Artist" : service.artist)
-                .font(.system(size: 13))
-                .foregroundStyle(.white.opacity(0.7))
+                .font(.system(size: 12))
+                .foregroundStyle(.white.opacity(0.6))
                 .lineLimit(1)
-
-            // Album
-            if !service.album.isEmpty {
-                Text(service.album)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.5))
-                    .lineLimit(1)
-            }
-
-            Spacer()
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    // MARK: - Progress Bar
+    // MARK: - Progress Bar (compact, at bottom)
     private var progressBarView: some View {
-        VStack(spacing: 4) {
-            // Slider
-            GeometryReader { geometry in
-                ZStack(alignment: .leading) {
-                    // Background track
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(Color.white.opacity(0.2))
-                        .frame(height: 4)
+        // TimelineView updates only when playing - more efficient than a timer
+        TimelineView(.animation(minimumInterval: 0.1, paused: !service.isPlaying)) { context in
+            let currentTime = isDraggingProgress
+                ? dragProgress * service.duration
+                : service.estimatedPlaybackPosition(at: context.date)
+            let progress = service.duration > 0 ? currentTime / service.duration : 0
 
-                    // Progress fill
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(Color.white)
-                        .frame(width: geometry.size.width * currentProgress, height: 4)
+            HStack(spacing: 6) {
+                // Current time
+                Text(formatTime(currentTime))
+                    .font(.system(size: 9, weight: .medium).monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.5))
+                    .frame(width: 28, alignment: .trailing)
 
-                    // Drag handle (appears on hover/drag)
-                    Circle()
-                        .fill(Color.white)
-                        .frame(width: 12, height: 12)
-                        .offset(x: geometry.size.width * currentProgress - 6)
-                        .opacity(isDraggingProgress ? 1 : 0)
+                // Compact slider
+                GeometryReader { geometry in
+                    ZStack(alignment: .leading) {
+                        // Background track
+                        RoundedRectangle(cornerRadius: 1.5)
+                            .fill(Color.white.opacity(0.2))
+                            .frame(height: 3)
+
+                        // Progress fill
+                        RoundedRectangle(cornerRadius: 1.5)
+                            .fill(Color.white.opacity(0.8))
+                            .frame(width: geometry.size.width * progress, height: 3)
+
+                        // Drag handle (appears on drag)
+                        Circle()
+                            .fill(Color.white)
+                            .frame(width: 10, height: 10)
+                            .offset(x: geometry.size.width * progress - 5)
+                            .opacity(isDraggingProgress ? 1 : 0)
+                    }
+                    .contentShape(Rectangle())
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { value in
+                                isDraggingProgress = true
+                                let prog = max(0, min(1, value.location.x / geometry.size.width))
+                                dragProgress = prog
+                            }
+                            .onEnded { value in
+                                isDraggingProgress = false
+                                let prog = max(0, min(1, value.location.x / geometry.size.width))
+                                let seekTime = prog * service.duration
+                                service.seek(to: seekTime)
+                            }
+                    )
                 }
-                .contentShape(Rectangle())
-                .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { value in
-                            isDraggingProgress = true
-                            let progress = max(0, min(1, value.location.x / geometry.size.width))
-                            dragProgress = progress
-                        }
-                        .onEnded { value in
-                            isDraggingProgress = false
-                            let progress = max(0, min(1, value.location.x / geometry.size.width))
-                            let seekTime = progress * service.duration
-                            service.seek(to: seekTime)
-                        }
-                )
-            }
-            .frame(height: 12)
+                .frame(height: 10)
 
-            // Time labels
-            HStack {
-                Text(isDraggingProgress ? formatTime(dragProgress * service.duration) : service.formattedElapsedTime)
-                    .font(.system(size: 10, weight: .medium).monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.6))
-
-                Spacer()
-
+                // Duration
                 Text(service.formattedDuration)
-                    .font(.system(size: 10, weight: .medium).monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.6))
+                    .font(.system(size: 9, weight: .medium).monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.5))
+                    .frame(width: 28, alignment: .leading)
             }
         }
-    }
-
-    private var currentProgress: Double {
-        if isDraggingProgress {
-            return dragProgress
-        }
-        return service.progress
     }
 
     private func formatTime(_ time: TimeInterval) -> String {
@@ -162,76 +176,61 @@ struct NowPlayingExpandedView: View {
         return String(format: "%d:%02d", minutes, seconds)
     }
 
-    // MARK: - Controls Row
+    // MARK: - Controls Row (iOS 26 style - simplified: prev, play/pause, next)
     private var controlsRow: some View {
-        HStack(spacing: 0) {
-            // Shuffle
-            controlButton(
-                icon: "shuffle",
-                isActive: service.isShuffled,
-                action: { service.toggleShuffle() }
-            )
-
-            Spacer()
-
+        HStack(spacing: 24) {
             // Previous
             controlButton(
                 icon: "backward.fill",
-                size: 16,
+                size: 18,
                 action: { service.previousTrack() }
             )
 
-            Spacer()
+            // Play/Pause (larger, centered)
+            ZStack {
+                Circle()
+                    .fill(Color.white)
+                    .frame(width: 36, height: 36)
 
-            // Play/Pause (larger)
-            Button(action: { service.togglePlayPause() }) {
-                ZStack {
-                    Circle()
-                        .fill(Color.white)
-                        .frame(width: 40, height: 40)
-
-                    Image(systemName: service.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 16, weight: .bold))
-                        .foregroundStyle(.black)
-                        .offset(x: service.isPlaying ? 0 : 1)  // Optical centering for play icon
-                }
+                Image(systemName: service.isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(.black)
+                    .offset(x: service.isPlaying ? 0 : 1)  // Optical centering for play icon
             }
-            .buttonStyle(.plain)
-
-            Spacer()
+            .highPriorityGesture(
+                TapGesture()
+                    .onEnded {
+                        debugLog("Play/Pause tapped")
+                        service.togglePlayPause()
+                    }
+            )
 
             // Next
             controlButton(
                 icon: "forward.fill",
-                size: 16,
+                size: 18,
                 action: { service.nextTrack() }
             )
-
-            Spacer()
-
-            // Favorite / Add to Library
-            controlButton(
-                icon: service.isFavorite ? "star.fill" : "star",
-                isActive: service.isFavorite,
-                action: { service.toggleFavorite() }
-            )
         }
-        .padding(.horizontal, 8)
     }
 
     private func controlButton(
         icon: String,
         size: CGFloat = 14,
-        isActive: Bool = false,
         action: @escaping () -> Void
     ) -> some View {
-        Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: size, weight: .medium))
-                .foregroundStyle(isActive ? Color.red : Color.white.opacity(0.8))
-                .frame(width: 32, height: 32)
-        }
-        .buttonStyle(.plain)
+        Image(systemName: icon)
+            .font(.system(size: size, weight: .medium))
+            .foregroundStyle(Color.white.opacity(0.8))
+            .frame(width: 36, height: 36)
+            .background(Color.white.opacity(0.001)) // Ensure hit area
+            .highPriorityGesture(
+                TapGesture()
+                    .onEnded {
+                        debugLog("Control button tapped: \(icon)")
+                        action()
+                    }
+            )
     }
 }
 
@@ -305,7 +304,7 @@ struct NowPlayingMiniExpandedView: View {
             }
 
             // Visualizer
-            AudioSpectrumView(isPlaying: .constant(service.isPlaying))
+            AudioSpectrumView(isPlaying: service.isPlaying)  // Fixed: was .constant()
                 .frame(width: 16, height: 14)
         }
         .padding(12)

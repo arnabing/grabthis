@@ -29,6 +29,28 @@ enum TranscriptionEngineType: String, CaseIterable, Identifiable {
         case .sfSpeech: return "Legacy cloud-based recognition"
         }
     }
+
+    /// Returns only engine types available on the current macOS version.
+    static var availableCases: [TranscriptionEngineType] {
+        var engines: [TranscriptionEngineType] = [.sfSpeech]
+        if #available(macOS 26, *) {
+            engines.insert(.speechAnalyzer, at: 0)
+        }
+        return engines
+    }
+
+    /// Check if this engine type is available on the current macOS version.
+    var isAvailable: Bool {
+        switch self {
+        case .speechAnalyzer:
+            if #available(macOS 26, *) {
+                return true
+            }
+            return false
+        case .sfSpeech:
+            return true
+        }
+    }
 }
 
 /// Protocol for pluggable STT backends.

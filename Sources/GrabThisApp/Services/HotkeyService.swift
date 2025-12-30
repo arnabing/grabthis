@@ -59,39 +59,38 @@ final class HotkeyService {
         stop()
         Log.hotkey.info("hotkey monitors starting")
 
+        // OPTIMIZATION: Use DispatchQueue.main.async instead of Task for faster dispatch
+        // Task { @MainActor } has additional overhead for actor isolation checks
         flagsMonitorGlobal = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged]) { [weak self] event in
-            Task { @MainActor [weak self] in
+            DispatchQueue.main.async { [weak self] in
                 self?.handleFlagsChanged(event)
             }
         }
         flagsMonitorLocal = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged]) { [weak self] event in
-            Task { @MainActor [weak self] in
-                self?.handleFlagsChanged(event)
-            }
+            // Local monitors are already on main thread - call directly
+            self?.handleFlagsChanged(event)
             return event
         }
 
         keyDownMonitorGlobal = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
-            Task { @MainActor [weak self] in
+            DispatchQueue.main.async { [weak self] in
                 self?.handleKeyDown(event)
             }
         }
         keyUpMonitorGlobal = NSEvent.addGlobalMonitorForEvents(matching: [.keyUp]) { [weak self] event in
-            Task { @MainActor [weak self] in
+            DispatchQueue.main.async { [weak self] in
                 self?.handleKeyUp(event)
             }
         }
 
         keyDownMonitorLocal = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
-            Task { @MainActor [weak self] in
-                self?.handleKeyDown(event)
-            }
+            // Local monitors are already on main thread - call directly
+            self?.handleKeyDown(event)
             return event
         }
         keyUpMonitorLocal = NSEvent.addLocalMonitorForEvents(matching: [.keyUp]) { [weak self] event in
-            Task { @MainActor [weak self] in
-                self?.handleKeyUp(event)
-            }
+            // Local monitors are already on main thread - call directly
+            self?.handleKeyUp(event)
             return event
         }
     }

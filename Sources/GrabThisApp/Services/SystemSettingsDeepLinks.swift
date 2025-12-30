@@ -32,6 +32,11 @@ enum SystemSettingsDeepLinks {
         open(urlString: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
     }
 
+    static func openAutomation() {
+        // Privacy & Security → Automation
+        open(urlString: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")
+    }
+
     private static func open(urlString: String) {
         guard let url = URL(string: urlString) else { return }
         NSWorkspace.shared.open(url)

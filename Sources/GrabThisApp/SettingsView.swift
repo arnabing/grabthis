@@ -7,7 +7,7 @@ import SwiftUI
 enum SettingsSection: String, CaseIterable, Identifiable {
     case general = "General"
     case media = "Media"
-    case privacy = "Privacy"
+    case permissions = "Permissions"
     case about = "About"
 
     var id: String { rawValue }
@@ -16,7 +16,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .general: return "gearshape"
         case .media: return "play.laptopcomputer"
-        case .privacy: return "lock.shield"
+        case .permissions: return "lock.shield"
         case .about: return "info.circle"
         }
     }
@@ -35,12 +35,14 @@ struct SettingsView: View {
 
     init(appState: AppState) {
         self.appState = appState
-        // Load saved preference or default to Apple (On-Device)
+        // Load saved preference, validating it's available on this macOS version
         if let saved = UserDefaults.standard.string(forKey: "sttEngineType"),
-           let type = TranscriptionEngineType(rawValue: saved) {
+           let type = TranscriptionEngineType(rawValue: saved),
+           type.isAvailable {
             _selectedEngine = State(initialValue: type)
         } else {
-            _selectedEngine = State(initialValue: .speechAnalyzer)
+            // Default to best available engine
+            _selectedEngine = State(initialValue: TranscriptionEngineType.availableCases.first ?? .sfSpeech)
         }
     }
 
@@ -63,18 +65,19 @@ struct SettingsView: View {
                 )
             case .media:
                 MediaSettingsView()
-            case .privacy:
-                PrivacySettingsView(
+            case .permissions:
+                PermissionsSettingsView(
                     micStatus: micStatus,
                     speechStatus: speechStatus,
                     screenRecordingGranted: screenRecordingGranted,
-                    accessibilityGranted: accessibilityGranted
+                    accessibilityGranted: accessibilityGranted,
+                    onRefresh: { refreshPermissions() }
                 )
             case .about:
                 AboutSettingsView()
             }
         }
-        .frame(width: 520, height: 380)
+        .frame(width: 520, height: 480)
         .onAppear { refreshPermissions() }
     }
 
@@ -96,7 +99,7 @@ private struct GeneralSettingsView: View {
         Form {
             Section {
                 Picker("Engine", selection: $selectedEngine) {
-                    ForEach(TranscriptionEngineType.allCases) { engine in
+                    ForEach(TranscriptionEngineType.availableCases) { engine in
                         Text(engine.displayName).tag(engine)
                     }
                 }
@@ -134,6 +137,7 @@ private struct GeneralSettingsView: View {
 
 private struct MediaSettingsView: View {
     @AppStorage("nowPlayingEnabled") private var nowPlayingEnabled: Bool = true
+    @AppStorage("autoPauseMusicDuringDictation") private var autoPauseDuringDictation: Bool = true
     @ObservedObject private var nowPlaying = NowPlayingService.shared
 
     var body: some View {
@@ -146,6 +150,16 @@ private struct MediaSettingsView: View {
                     .foregroundStyle(.secondary)
             } header: {
                 Text("Now Playing")
+            }
+
+            Section {
+                Toggle("Pause music during dictation", isOn: $autoPauseDuringDictation)
+
+                Text("Automatically pause and resume music when dictating. Prevents Bluetooth audio quality degradation.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("Dictation")
             }
 
             Section {
@@ -188,16 +202,61 @@ private struct MediaSettingsView: View {
     }
 }
 
-// MARK: - Privacy Settings
+// MARK: - Permissions Settings
 
-private struct PrivacySettingsView: View {
+private struct PermissionsSettingsView: View {
     let micStatus: AVAuthorizationStatus
     let speechStatus: SFSpeechRecognizerAuthorizationStatus
     let screenRecordingGranted: Bool
     let accessibilityGranted: Bool
+    let onRefresh: () -> Void
+
+    /// Count of required permissions (excludes optional Automation)
+    private var grantedCount: Int {
+        var count = 0
+        if micStatus == .authorized { count += 1 }
+        if speechStatus == .authorized { count += 1 }
+        if screenRecordingGranted { count += 1 }
+        if accessibilityGranted { count += 1 }
+        return count
+    }
+
+    private var allGranted: Bool { grantedCount == 4 }
 
     var body: some View {
         Form {
+            // Status summary with action buttons
+            Section {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("\(grantedCount) of 4 required permissions")
+                            .font(.headline)
+                        Text(allGranted ? "All set!" : "Some permissions are missing")
+                            .font(.caption)
+                            .foregroundStyle(allGranted ? .green : .orange)
+                    }
+
+                    Spacer()
+
+                    HStack(spacing: 8) {
+                        Button("Refresh") {
+                            onRefresh()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+
+                        if !allGranted {
+                            Button("Open Settings") {
+                                openFirstMissingPermission()
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+
             Section {
                 PermissionRow(
                     icon: "mic.fill",
@@ -232,13 +291,24 @@ private struct PrivacySettingsView: View {
                 )
             } header: {
                 Text("Permissions")
-            } footer: {
-                Text("Click \"Open\" to grant permissions in System Settings.")
-                    .font(.caption)
             }
         }
         .formStyle(.grouped)
         .scrollDisabled(true)
+    }
+
+    /// Opens System Settings for the first missing required permission (excludes optional Automation)
+    private func openFirstMissingPermission() {
+        if micStatus != .authorized {
+            SystemSettingsDeepLinks.openMicrophone()
+        } else if speechStatus != .authorized {
+            SystemSettingsDeepLinks.openSpeechRecognition()
+        } else if !screenRecordingGranted {
+            SystemSettingsDeepLinks.openScreenRecording()
+        } else if !accessibilityGranted {
+            SystemSettingsDeepLinks.openAccessibility()
+        }
+        // Automation is optional, so we don't navigate to it automatically
     }
 }
 
@@ -305,6 +375,25 @@ private struct AboutSettingsView: View {
                 }
             } header: {
                 Text("App Info")
+            }
+
+            Section {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Built by Arnab Raychaudhuri")
+                        .fontWeight(.medium)
+
+                    Link(destination: URL(string: "https://www.linkedin.com/in/arnabing/")!) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "link")
+                                .font(.caption)
+                            Text("linkedin.com/in/arnabing")
+                        }
+                        .font(.subheadline)
+                    }
+                }
+                .padding(.vertical, 4)
+            } header: {
+                Text("Developer")
             }
 
             Section {

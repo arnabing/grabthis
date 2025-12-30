@@ -15,6 +15,14 @@ final class SFSpeechTranscriptionEngine: ObservableObject, TranscriptionEngine {
     private var recognitionTask: SFSpeechRecognitionTask?
     private var stopRequestedAt: Date?
 
+    /// Accumulates finalized segments for very long dictations (>60s)
+    /// SFSpeechRecognizer may segment audio and deliver multiple `isFinal` results
+    private var accumulatedFinalText: String = ""
+
+    /// Track the longest partial we've seen to prevent regression
+    /// (recognizer may re-evaluate and temporarily return shorter text)
+    private var longestPartialSeen: String = ""
+
     private let audioEngine = AVAudioEngine()
 
     init(locale: Locale = .current) {
@@ -39,6 +47,8 @@ final class SFSpeechTranscriptionEngine: ObservableObject, TranscriptionEngine {
 
         partialText = ""
         finalText = ""
+        accumulatedFinalText = ""
+        longestPartialSeen = ""
 
         // IMPORTANT: The audio tap callback runs off the main thread.
         // Do not touch @MainActor state from inside that callback.
@@ -75,16 +85,37 @@ final class SFSpeechTranscriptionEngine: ObservableObject, TranscriptionEngine {
             guard let self else { return }
             Task { @MainActor in
                 if let result {
-                    self.partialText = result.bestTranscription.formattedString
-                    Log.stt.debug("partial: \(self.partialText, privacy: .public)")
+                    let newText = result.bestTranscription.formattedString
+
+                    // Combine accumulated final segments with current partial
+                    let fullText = self.accumulatedFinalText.isEmpty
+                        ? newText
+                        : self.accumulatedFinalText + " " + newText
+
+                    // Prevent regression: only update if we have more text than before
+                    // (recognizer may temporarily return shorter text during re-evaluation)
+                    if fullText.count >= self.longestPartialSeen.count {
+                        self.partialText = fullText
+                        self.longestPartialSeen = fullText
+                    }
+
+                    Log.stt.debug("partial: \(self.partialText.suffix(50), privacy: .public) (len=\(self.partialText.count))")
+
                     if result.isFinal {
-                        self.finalText = self.partialText
+                        // Accumulate this segment for very long dictations
+                        if self.accumulatedFinalText.isEmpty {
+                            self.accumulatedFinalText = newText
+                        } else {
+                            self.accumulatedFinalText += " " + newText
+                        }
+                        self.finalText = self.accumulatedFinalText
+
                         // IMPORTANT: The recognizer can emit `isFinal` while we're still holding
                         // push-to-talk (e.g., brief silence). Do not end the session early.
                         if self.stopRequestedAt != nil {
                             self.state = .stopped
                         }
-                        Log.stt.info("final: \(self.finalText, privacy: .public) stopRequested=\(self.stopRequestedAt != nil, privacy: .public)")
+                        Log.stt.info("final segment: '\(newText.prefix(30))...' accumulated len=\(self.finalText.count) stopRequested=\(self.stopRequestedAt != nil, privacy: .public)")
                     }
                 }
                 if let error {
@@ -119,11 +150,12 @@ final class SFSpeechTranscriptionEngine: ObservableObject, TranscriptionEngine {
             try? await Task.sleep(nanoseconds: tailNanoseconds)
         }
 
-        // Stop audio input and signal end of audio. Do NOT cancel recognitionTask immediately;
-        // we want a chance to receive a final result.
+        // Stop audio input IMMEDIATELY to release microphone
+        // This helps Bluetooth switch from HFP back to A2DP faster
         audioEngine.stop()
         audioEngine.inputNode.removeTap(onBus: 0)
         recognitionRequest?.endAudio()
+        Log.stt.info("🎧 Audio engine stopped - Bluetooth should recover to A2DP")
 
         let deadline = Date().addingTimeInterval(Double(finalWaitNanoseconds) / 1_000_000_000.0)
         while Date() < deadline {
@@ -138,9 +170,9 @@ final class SFSpeechTranscriptionEngine: ObservableObject, TranscriptionEngine {
         recognitionTask = nil
         recognitionRequest = nil
 
-        // Prefer final, otherwise keep the best partial.
+        // Prefer final (accumulated), otherwise keep the longest partial we saw
         if finalText.isEmpty {
-            finalText = partialText
+            finalText = longestPartialSeen.isEmpty ? partialText : longestPartialSeen
         }
 
         // If the recognizer reported an error like "No speech detected" but we have text,
@@ -163,6 +195,8 @@ final class SFSpeechTranscriptionEngine: ObservableObject, TranscriptionEngine {
         }
         partialText = ""
         finalText = ""
+        accumulatedFinalText = ""
+        longestPartialSeen = ""
         state = .idle
     }
 }

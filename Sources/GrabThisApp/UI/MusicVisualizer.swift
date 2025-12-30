@@ -14,7 +14,7 @@ import SwiftUI
 class AudioSpectrum: NSView {
     private var barLayers: [CAShapeLayer] = []
     private var barScales: [CGFloat] = []
-    private var isPlaying: Bool = false
+    private var isPlaying: Bool = true
     private var animationTimer: Timer?
 
     override init(frame frameRect: NSRect) {
@@ -52,7 +52,7 @@ class AudioSpectrum: NSView {
                                     yRadius: barWidth / 2)
             barLayer.path = path.cgPath
             barLayers.append(barLayer)
-            barScales.append(0.35)
+            barScales.append(0.35)  // Match boring.notch
             layer?.addSublayer(barLayer)
         }
     }
@@ -64,8 +64,6 @@ class AudioSpectrum: NSView {
                 self?.updateBars()
             }
         }
-        // Trigger immediate update
-        updateBars()
     }
 
     private func stopAnimating() {
@@ -75,6 +73,7 @@ class AudioSpectrum: NSView {
     }
 
     private func updateBars() {
+        // Match boring.notch exactly
         for (i, barLayer) in barLayers.enumerated() {
             let currentScale = barScales[i]
             let targetScale = CGFloat.random(in: 0.35...1.0)
@@ -84,7 +83,7 @@ class AudioSpectrum: NSView {
             animation.fromValue = currentScale
             animation.toValue = targetScale
             animation.duration = 0.3
-            animation.autoreverses = true
+            animation.autoreverses = true  // KEY: Makes bars bounce back
             animation.fillMode = .forwards
             animation.isRemovedOnCompletion = false
 
@@ -105,7 +104,7 @@ class AudioSpectrum: NSView {
     }
 
     func setPlaying(_ playing: Bool) {
-        guard isPlaying != playing else { return }
+        // Match boring.notch: no guard, just set directly
         isPlaying = playing
         if isPlaying {
             startAnimating()
@@ -118,7 +117,7 @@ class AudioSpectrum: NSView {
 // MARK: - SwiftUI Wrapper
 
 struct AudioSpectrumView: NSViewRepresentable {
-    @Binding var isPlaying: Bool
+    var isPlaying: Bool  // Plain Bool instead of @Binding for proper updates
 
     func makeNSView(context: Context) -> AudioSpectrum {
         let spectrum = AudioSpectrum()
@@ -193,7 +192,7 @@ struct MusicVisualizerView: View {
 #Preview {
     VStack(spacing: 20) {
         Text("NSView-based (preferred)")
-        AudioSpectrumView(isPlaying: .constant(true))
+        AudioSpectrumView(isPlaying: true)
             .frame(width: 20, height: 14)
 
         Text("Pure SwiftUI")

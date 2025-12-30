@@ -10,9 +10,11 @@ struct PermissionRequestView: View {
     let isRequired: Bool
     let onAllow: () -> Void
     let onSkip: () -> Void
+    var buttonText: String = "Open Settings"  // Clearer default text
+    var showInstructions: Bool = true  // Show step-by-step instructions
 
     var body: some View {
-        VStack(spacing: 28) {
+        VStack(spacing: 24) {
             Spacer()
 
             // Large icon
@@ -25,7 +27,7 @@ struct PermissionRequestView: View {
                         endPoint: .bottomTrailing
                     )
                 )
-                .padding(.bottom, 8)
+                .padding(.bottom, 4)
 
             // Title
             VStack(spacing: 4) {
@@ -57,6 +59,19 @@ struct PermissionRequestView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 32)
 
+            // Step-by-step instructions
+            if showInstructions {
+                VStack(alignment: .leading, spacing: 8) {
+                    instructionRow(step: 1, text: "Click '\(buttonText)' below")
+                    instructionRow(step: 2, text: "Find 'GrabThisApp' in the list")
+                    instructionRow(step: 3, text: "Toggle the switch ON")
+                }
+                .padding(.horizontal, 48)
+                .padding(.vertical, 12)
+                .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
+                .padding(.horizontal, 24)
+            }
+
             // Privacy note with lock icon
             if let privacyNote {
                 HStack(spacing: 8) {
@@ -69,21 +84,24 @@ struct PermissionRequestView: View {
                         .multilineTextAlignment(.leading)
                 }
                 .padding(.horizontal, 24)
-                .padding(.top, 8)
             }
 
             Spacer()
 
             // Action buttons
             HStack(spacing: 16) {
-                Button("Not Now") {
+                Button("Skip") {
                     onSkip()
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.large)
 
-                Button("Allow Access") {
-                    onAllow()
+                Button(action: onAllow) {
+                    HStack(spacing: 6) {
+                        Text(buttonText)
+                        Image(systemName: "arrow.up.forward.square")
+                            .font(.system(size: 12))
+                    }
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
@@ -92,6 +110,20 @@ struct PermissionRequestView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.ultraThinMaterial)
+    }
+
+    private func instructionRow(step: Int, text: String) -> some View {
+        HStack(spacing: 10) {
+            Text("\(step)")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(.white)
+                .frame(width: 20, height: 20)
+                .background(Color.blue, in: Circle())
+
+            Text(text)
+                .font(.subheadline)
+                .foregroundStyle(.primary)
+        }
     }
 }
 

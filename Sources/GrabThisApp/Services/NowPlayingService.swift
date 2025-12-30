@@ -2,14 +2,32 @@
 //  NowPlayingService.swift
 //  GrabThisApp
 //
-//  Now Playing media controls using MediaRemote.framework
-//  Based on boring.notch's implementation
+//  Now Playing media controls using MediaRemoteAdapter.
+//  Based on boring.notch's implementation - spawns a Perl process
+//  that streams JSON updates for reliable media detection.
 //
 
 import AppKit
 import Combine
 import Foundation
+import os.log
 import SwiftUI
+
+private let logger = Logger(subsystem: "com.grabthis.app", category: "NowPlaying")
+
+// Simple file-based debug logging
+private func debugLog(_ message: String) {
+    let logPath = "/tmp/grabthis_debug.log"
+    let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+    let line = "[\(timestamp)] NowPlayingService: \(message)\n"
+    if let handle = FileHandle(forWritingAtPath: logPath) {
+        handle.seekToEndOfFile()
+        handle.write(line.data(using: .utf8)!)
+        handle.closeFile()
+    } else {
+        FileManager.default.createFile(atPath: logPath, contents: line.data(using: .utf8))
+    }
+}
 
 enum RepeatMode: Int, Codable {
     case off = 1
@@ -29,6 +47,10 @@ final class NowPlayingService: ObservableObject {
     @Published private(set) var title: String = ""
     @Published private(set) var artist: String = ""
     @Published private(set) var album: String = ""
+
+    // MARK: - Song Change Detection (for sneak peek on new song)
+    private var lastPeekTitle: String = ""
+    private var lastPeekArtist: String = ""
     @Published private(set) var albumArt: NSImage?
     @Published private(set) var dominantColor: NSColor = .white
     @Published private(set) var duration: TimeInterval = 0
@@ -41,379 +63,276 @@ final class NowPlayingService: ObservableObject {
     @Published private(set) var playbackRate: Double = 1.0
     @Published private(set) var lastUpdated: Date = Date()
 
-    // MARK: - MediaRemote Function Pointers
+    // MARK: - MediaRemote Function Pointers (for sending commands)
     private var MRMediaRemoteSendCommandFunction: (@convention(c) (Int, AnyObject?) -> Void)?
     private var MRMediaRemoteSetElapsedTimeFunction: (@convention(c) (Double) -> Void)?
     private var MRMediaRemoteSetShuffleModeFunction: (@convention(c) (Int) -> Void)?
     private var MRMediaRemoteSetRepeatModeFunction: (@convention(c) (Int) -> Void)?
-    private var MRMediaRemoteGetNowPlayingInfoFunction: (@convention(c) (DispatchQueue, @escaping ([String: Any]?) -> Void) -> Void)?
-    private var MRMediaRemoteGetNowPlayingApplicationIsPlayingFunction: (@convention(c) (DispatchQueue, @escaping (Bool) -> Void) -> Void)?
 
     private var mediaRemoteBundle: CFBundle?
-    private var updateTimer: Timer?
-    private var cancellables = Set<AnyCancellable>()
-    private var notificationTask: Task<Void, Never>?
-    private var spotifyNotificationTask: Task<Void, Never>?
+
+    // MARK: - Process-based Streaming (boring.notch approach)
+    private var process: Process?
+    private var pipeHandler: JSONLinesPipeHandler?
+    private var streamTask: Task<Void, Never>?
 
     // MARK: - Initialization
     private init() {
-        print("NowPlayingService: Initializing...")
+        print("🎵 NowPlayingService initializing...")
+        logger.info("Initializing NowPlayingService (process-based streaming)...")
         loadMediaRemoteFramework()
-        setupNotificationObservers()
-        startPeriodicUpdates()
-        print("NowPlayingService: Initialization complete. isEnabled=\(isEnabled)")
+        Task { await setupNowPlayingObserver() }
     }
 
-    // Timer cleanup happens automatically when the service is deallocated
+    deinit {
+        streamTask?.cancel()
 
-    // MARK: - MediaRemote Framework Loading
+        if let pipeHandler = self.pipeHandler {
+            Task { await pipeHandler.close() }
+        }
+
+        if let process = self.process {
+            if process.isRunning {
+                process.terminate()
+                process.waitUntilExit()
+            }
+        }
+
+        self.process = nil
+        self.pipeHandler = nil
+    }
+
+    // MARK: - MediaRemote Framework Loading (for commands only)
     private func loadMediaRemoteFramework() {
         guard let bundle = CFBundleCreate(
             kCFAllocatorDefault,
             NSURL(fileURLWithPath: "/System/Library/PrivateFrameworks/MediaRemote.framework")
         ) else {
-            print("NowPlayingService: Failed to load MediaRemote.framework")
+            logger.error("Failed to load MediaRemote.framework")
             return
         }
 
         mediaRemoteBundle = bundle
 
-        // Load function pointers
+        // Load function pointers for sending commands
         if let ptr = CFBundleGetFunctionPointerForName(bundle, "MRMediaRemoteSendCommand" as CFString) {
             MRMediaRemoteSendCommandFunction = unsafeBitCast(ptr, to: (@convention(c) (Int, AnyObject?) -> Void).self)
+            logger.info("Loaded MRMediaRemoteSendCommand")
+        } else {
+            logger.error("Failed to load MRMediaRemoteSendCommand")
         }
 
         if let ptr = CFBundleGetFunctionPointerForName(bundle, "MRMediaRemoteSetElapsedTime" as CFString) {
             MRMediaRemoteSetElapsedTimeFunction = unsafeBitCast(ptr, to: (@convention(c) (Double) -> Void).self)
+            logger.info("Loaded MRMediaRemoteSetElapsedTime")
+        } else {
+            logger.error("Failed to load MRMediaRemoteSetElapsedTime")
         }
 
         if let ptr = CFBundleGetFunctionPointerForName(bundle, "MRMediaRemoteSetShuffleMode" as CFString) {
             MRMediaRemoteSetShuffleModeFunction = unsafeBitCast(ptr, to: (@convention(c) (Int) -> Void).self)
+            logger.info("Loaded MRMediaRemoteSetShuffleMode")
+        } else {
+            logger.error("Failed to load MRMediaRemoteSetShuffleMode")
         }
 
         if let ptr = CFBundleGetFunctionPointerForName(bundle, "MRMediaRemoteSetRepeatMode" as CFString) {
             MRMediaRemoteSetRepeatModeFunction = unsafeBitCast(ptr, to: (@convention(c) (Int) -> Void).self)
+            logger.info("Loaded MRMediaRemoteSetRepeatMode")
+        } else {
+            logger.error("Failed to load MRMediaRemoteSetRepeatMode")
         }
 
-        if let ptr = CFBundleGetFunctionPointerForName(bundle, "MRMediaRemoteGetNowPlayingInfo" as CFString) {
-            MRMediaRemoteGetNowPlayingInfoFunction = unsafeBitCast(ptr, to: (@convention(c) (DispatchQueue, @escaping ([String: Any]?) -> Void) -> Void).self)
-        }
-
-        if let ptr = CFBundleGetFunctionPointerForName(bundle, "MRMediaRemoteGetNowPlayingApplicationIsPlaying" as CFString) {
-            MRMediaRemoteGetNowPlayingApplicationIsPlayingFunction = unsafeBitCast(ptr, to: (@convention(c) (DispatchQueue, @escaping (Bool) -> Void) -> Void).self)
-        }
-
-        print("NowPlayingService: MediaRemote framework loaded successfully")
+        print("🎵 MediaRemote framework loaded - SendCommand: \(MRMediaRemoteSendCommandFunction != nil)")
+        logger.info("MediaRemote framework loaded")
     }
 
-    // MARK: - Notification Observers (boring.notch async pattern)
-    private func setupNotificationObservers() {
-        // Apple Music - async notification stream (boring.notch pattern)
-        notificationTask = Task { @MainActor [weak self] in
-            let notifications = DistributedNotificationCenter.default().notifications(
-                named: NSNotification.Name("com.apple.Music.playerInfo")
-            )
-            for await _ in notifications {
-                print("🎵 Apple Music notification received")
-                await self?.pollNowPlayingViaAppleScript()
-            }
-        }
-
-        // Spotify - async notification stream
-        spotifyNotificationTask = Task { @MainActor [weak self] in
-            let notifications = DistributedNotificationCenter.default().notifications(
-                named: NSNotification.Name("com.spotify.client.PlaybackStateChanged")
-            )
-            for await _ in notifications {
-                print("🎵 Spotify notification received")
-                await self?.pollNowPlayingViaAppleScript()
-            }
-        }
-
-        print("🎵 NowPlayingService: Notification observers set up (async pattern)")
-    }
-
-    private func startPeriodicUpdates() {
-        // Poll for now playing info every 2 seconds (reliable fallback)
-        updateTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                guard let self = self else { return }
-                // Update elapsed time if playing
-                if self.isPlaying {
-                    let timeSinceUpdate = Date().timeIntervalSince(self.lastUpdated)
-                    self.elapsedTime = min(self.elapsedTime + (timeSinceUpdate * self.playbackRate), self.duration)
-                    self.lastUpdated = Date()
-                }
-                // Poll for updates via AppleScript (reliable)
-                await self.pollNowPlayingViaAppleScript()
-            }
-        }
-
-        // Initial fetch
-        updateNowPlayingInfo()
-        Task {
-            await pollNowPlayingViaAppleScript()
-        }
-    }
-
-    // MARK: - AppleScript-based polling (reliable fallback)
-    private func pollNowPlayingViaAppleScript() async {
-        // Check Apple Music first
-        let musicApps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Music")
-        if !musicApps.isEmpty {
-            await fetchAppleMusicInfo()
+    // MARK: - Setup Process-based Observer
+    private func setupNowPlayingObserver() async {
+        let process = Process()
+        guard
+            let scriptURL = Bundle.main.url(forResource: "mediaremote-adapter", withExtension: "pl"),
+            let frameworkPath = Bundle.main.privateFrameworksPath?.appending("/PrivateFrameworks/MediaRemoteAdapter.framework")
+        else {
+            logger.error("Could not find mediaremote-adapter.pl script or framework path")
+            logger.error("scriptURL exists: \(Bundle.main.url(forResource: "mediaremote-adapter", withExtension: "pl") != nil)")
+            logger.error("privateFrameworksPath: \(Bundle.main.privateFrameworksPath ?? "nil")")
             return
         }
 
-        // Check Spotify
-        let spotifyApps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.spotify.client")
-        if !spotifyApps.isEmpty {
-            await fetchSpotifyInfo()
-            return
-        }
+        logger.info("Setting up process: perl \(scriptURL.path) \(frameworkPath) stream")
 
-        // No music app running
-        hasActivePlayer = false
-    }
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
+        process.arguments = [scriptURL.path, frameworkPath, "stream"]
 
-    private func fetchAppleMusicInfo() async {
-        let script = """
-        tell application "Music"
-            if it is running then
-                try
-                    set playerState to player state as string
-                    set trackName to name of current track
-                    set trackArtist to artist of current track
-                    set trackAlbum to album of current track
-                    set trackDuration to duration of current track
-                    set trackPosition to player position
-                    return playerState & "|" & trackName & "|" & trackArtist & "|" & trackAlbum & "|" & trackDuration & "|" & trackPosition
-                on error
-                    return "stopped|||||"
-                end try
-            else
-                return "stopped|||||"
-            end if
-        end tell
-        """
+        let pipeHandler = JSONLinesPipeHandler()
+        process.standardOutput = await pipeHandler.getPipe()
 
-        if let appleScript = NSAppleScript(source: script) {
-            var error: NSDictionary?
-            let result = appleScript.executeAndReturnError(&error)
-            if error == nil, let output = result.stringValue {
-                let parts = output.components(separatedBy: "|")
-                if parts.count >= 6 {
-                    let state = parts[0]
-                    isPlaying = state == "playing"
-                    title = parts[1]
-                    artist = parts[2]
-                    album = parts[3]
-                    duration = Double(parts[4]) ?? 0
-                    elapsedTime = Double(parts[5]) ?? 0
-                    bundleIdentifier = "com.apple.Music"
-                    hasActivePlayer = !title.isEmpty
-                    lastUpdated = Date()
-                    print("🎵 Apple Music: '\(title)' by \(artist), playing=\(isPlaying), active=\(hasActivePlayer)")
-                }
-            } else if let error = error {
-                print("🎵 Apple Music AppleScript error: \(error)")
-            }
-        }
-    }
-
-    private func fetchSpotifyInfo() async {
-        let script = """
-        tell application "Spotify"
-            if it is running then
-                try
-                    set playerState to player state as string
-                    set trackName to name of current track
-                    set trackArtist to artist of current track
-                    set trackAlbum to album of current track
-                    set trackDuration to (duration of current track) / 1000
-                    set trackPosition to player position
-                    return playerState & "|" & trackName & "|" & trackArtist & "|" & trackAlbum & "|" & trackDuration & "|" & trackPosition
-                on error
-                    return "stopped|||||"
-                end try
-            else
-                return "stopped|||||"
-            end if
-        end tell
-        """
-
-        if let appleScript = NSAppleScript(source: script) {
-            var error: NSDictionary?
-            let result = appleScript.executeAndReturnError(&error)
-            if error == nil, let output = result.stringValue {
-                let parts = output.components(separatedBy: "|")
-                if parts.count >= 6 {
-                    let state = parts[0]
-                    isPlaying = state == "playing"
-                    title = parts[1]
-                    artist = parts[2]
-                    album = parts[3]
-                    duration = Double(parts[4]) ?? 0
-                    elapsedTime = Double(parts[5]) ?? 0
-                    bundleIdentifier = "com.spotify.client"
-                    hasActivePlayer = !title.isEmpty
-                    lastUpdated = Date()
-                    print("🎵 Spotify: '\(title)' by \(artist), playing=\(isPlaying), active=\(hasActivePlayer)")
-                }
-            } else if let error = error {
-                print("🎵 Spotify AppleScript error: \(error)")
-            }
-        }
-    }
-
-    // MARK: - Notification Handlers
-    private func handleMusicUpdate(
-        state: String?, name: String?, artist artistName: String?,
-        album albumName: String?, totalTime: Double?, position: Double?
-    ) {
-        bundleIdentifier = "com.apple.Music"
-
-        if let state = state {
-            isPlaying = state == "Playing"
-        }
-
-        if let name = name {
-            title = name
-        }
-
-        if let artistName = artistName {
-            artist = artistName
-        }
-
-        if let albumName = albumName {
-            album = albumName
-        }
-
-        if let totalTime = totalTime {
-            duration = totalTime / 1000.0  // Convert ms to seconds
-        }
-
-        if let position = position {
-            elapsedTime = position
-        }
-
-        hasActivePlayer = !title.isEmpty
-        lastUpdated = Date()
-
-        // Fetch artwork via MediaRemote
-        updateNowPlayingInfo()
-    }
-
-    private func handleSpotifyUpdate(
-        state: String?, name: String?, artist artistName: String?,
-        album albumName: String?, duration durationMs: Double?, position: Double?
-    ) {
-        bundleIdentifier = "com.spotify.client"
-
-        if let state = state {
-            isPlaying = state == "Playing"
-        }
-
-        if let name = name {
-            title = name
-        }
-
-        if let artistName = artistName {
-            artist = artistName
-        }
-
-        if let albumName = albumName {
-            album = albumName
-        }
-
-        if let durationMs = durationMs {
-            duration = durationMs / 1000.0
-        }
-
-        if let position = position {
-            elapsedTime = position
-        }
-
-        hasActivePlayer = !title.isEmpty
-        lastUpdated = Date()
-
-        updateNowPlayingInfo()
-    }
-
-    // MARK: - MediaRemote Info Fetch
-    private func updateNowPlayingInfo() {
-        MRMediaRemoteGetNowPlayingInfoFunction?(DispatchQueue.main) { [weak self] info in
-            Task { @MainActor in
-                self?.processNowPlayingInfo(info)
+        // Capture stderr for debugging
+        let stderrPipe = Pipe()
+        process.standardError = stderrPipe
+        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if !data.isEmpty, let str = String(data: data, encoding: .utf8) {
+                logger.warning("mediaremote-adapter stderr: \(str)")
             }
         }
 
-        MRMediaRemoteGetNowPlayingApplicationIsPlayingFunction?(DispatchQueue.main) { [weak self] playing in
-            Task { @MainActor in
-                self?.isPlaying = playing
+        self.process = process
+        self.pipeHandler = pipeHandler
+
+        do {
+            try process.run()
+            logger.info("mediaremote-adapter process started successfully")
+            streamTask = Task { [weak self] in
+                await self?.processJSONStream()
             }
+        } catch {
+            logger.error("Failed to launch mediaremote-adapter.pl: \(error.localizedDescription)")
         }
     }
 
-    private func processNowPlayingInfo(_ info: [String: Any]?) {
-        guard let info = info else {
-            print("NowPlayingService: processNowPlayingInfo received nil")
-            hasActivePlayer = false
-            return
+    // MARK: - Async Stream Processing
+    private func processJSONStream() async {
+        guard let pipeHandler = self.pipeHandler else { return }
+
+        await pipeHandler.readJSONLines(as: NowPlayingUpdate.self) { [weak self] update in
+            await self?.handleAdapterUpdate(update)
+        }
+    }
+
+    // MARK: - Handle Update from Adapter
+    private func handleAdapterUpdate(_ update: NowPlayingUpdate) async {
+        let payload = update.payload
+        let diff = update.diff ?? false
+
+        let oldHasActivePlayer = hasActivePlayer
+        let oldIsPlaying = isPlaying
+
+        // Update title
+        if let newTitle = payload.title {
+            title = newTitle
+        } else if !diff {
+            title = ""
         }
 
-        print("NowPlayingService: processNowPlayingInfo received \(info.keys.count) keys")
-
-        // kMRMediaRemoteNowPlayingInfoTitle
-        if let infoTitle = info["kMRMediaRemoteNowPlayingInfoTitle"] as? String {
-            title = infoTitle
+        // Update artist
+        if let newArtist = payload.artist {
+            artist = newArtist
+        } else if !diff {
+            artist = ""
         }
 
-        // kMRMediaRemoteNowPlayingInfoArtist
-        if let infoArtist = info["kMRMediaRemoteNowPlayingInfoArtist"] as? String {
-            artist = infoArtist
+        // Update album
+        if let newAlbum = payload.album {
+            album = newAlbum
+        } else if !diff {
+            album = ""
         }
 
-        // kMRMediaRemoteNowPlayingInfoAlbum
-        if let infoAlbum = info["kMRMediaRemoteNowPlayingInfoAlbum"] as? String {
-            album = infoAlbum
+        // Update duration
+        if let newDuration = payload.duration {
+            duration = newDuration
+        } else if !diff {
+            duration = 0
         }
 
-        // kMRMediaRemoteNowPlayingInfoDuration
-        if let infoDuration = info["kMRMediaRemoteNowPlayingInfoDuration"] as? Double {
-            duration = infoDuration
+        // Update elapsed time - store actual value and timestamp
+        // Views use estimatedPlaybackPosition(at:) for real-time interpolation
+        if let newElapsedTime = payload.elapsedTime {
+            elapsedTime = newElapsedTime
+            lastUpdated = Date()  // Mark when we got this value
+        } else if !diff {
+            // Full update without elapsed time means reset
+            elapsedTime = 0
+            lastUpdated = Date()
         }
 
-        // kMRMediaRemoteNowPlayingInfoElapsedTime
-        if let infoElapsed = info["kMRMediaRemoteNowPlayingInfoElapsedTime"] as? Double {
-            elapsedTime = infoElapsed
+        // Update shuffle mode
+        if let shuffleMode = payload.shuffleMode {
+            isShuffled = shuffleMode != 1
+        } else if !diff {
+            isShuffled = false
         }
 
-        // kMRMediaRemoteNowPlayingInfoPlaybackRate
-        if let rate = info["kMRMediaRemoteNowPlayingInfoPlaybackRate"] as? Double {
-            playbackRate = rate
-            isPlaying = rate > 0
-        }
-
-        // kMRMediaRemoteNowPlayingInfoShuffleMode
-        if let shuffleMode = info["kMRMediaRemoteNowPlayingInfoShuffleMode"] as? Int {
-            isShuffled = shuffleMode != 1  // 1 = off
-        }
-
-        // kMRMediaRemoteNowPlayingInfoRepeatMode
-        if let repeatModeValue = info["kMRMediaRemoteNowPlayingInfoRepeatMode"] as? Int {
+        // Update repeat mode
+        if let repeatModeValue = payload.repeatMode {
             repeatMode = RepeatMode(rawValue: repeatModeValue) ?? .off
+        } else if !diff {
+            repeatMode = .off
         }
 
-        // kMRMediaRemoteNowPlayingInfoArtworkData
-        if let artworkData = info["kMRMediaRemoteNowPlayingInfoArtworkData"] as? Data,
-           let image = NSImage(data: artworkData) {
-            albumArt = image
-            extractDominantColor(from: image)
+        // Update artwork
+        if let artworkDataString = payload.artworkData {
+            if let artworkData = Data(base64Encoded: artworkDataString.trimmingCharacters(in: .whitespacesAndNewlines)),
+               let image = NSImage(data: artworkData) {
+                albumArt = image
+                extractDominantColor(from: image)
+            }
+        } else if !diff {
+            albumArt = nil
         }
 
+        // Update timestamp
+        if let dateString = payload.timestamp,
+           let date = ISO8601DateFormatter().date(from: dateString) {
+            lastUpdated = date
+        } else if !diff {
+            lastUpdated = Date()
+        }
+
+        // Update playback rate and playing state
+        if let newRate = payload.playbackRate {
+            playbackRate = newRate
+        } else if !diff {
+            playbackRate = 1.0
+        }
+
+        if let newPlaying = payload.playing {
+            isPlaying = newPlaying
+        } else if !diff {
+            isPlaying = false
+        }
+
+        // Update bundle identifier
+        if let parentBundle = payload.parentApplicationBundleIdentifier {
+            bundleIdentifier = parentBundle
+        } else if let bundle = payload.bundleIdentifier {
+            bundleIdentifier = bundle
+        } else if !diff {
+            bundleIdentifier = ""
+        }
+
+        // Update hasActivePlayer
         hasActivePlayer = !title.isEmpty
-        lastUpdated = Date()
+
+        // Log the update
+        if hasActivePlayer {
+            logger.debug("Now playing: '\(self.title)' by \(self.artist) [\(self.bundleIdentifier)], playing=\(self.isPlaying)")
+        }
+
+        // POST notification if hasActivePlayer or isPlaying changed
+        // This is critical for NotchCoordinator to switch pages
+        if hasActivePlayer != oldHasActivePlayer || isPlaying != oldIsPlaying {
+            print("🎵 NowPlayingService: Posting .nowPlayingDidChange (hasActivePlayer: \(oldHasActivePlayer)->\(self.hasActivePlayer), isPlaying: \(oldIsPlaying)->\(self.isPlaying), title: '\(self.title)')")
+            logger.info("Posting .nowPlayingDidChange notification (hasActivePlayer: \(oldHasActivePlayer)->\(self.hasActivePlayer), isPlaying: \(oldIsPlaying)->\(self.isPlaying))")
+            NotificationCenter.default.post(name: .nowPlayingDidChange, object: nil)
+        }
+
+        // SONG CHANGE DETECTION - Trigger sneak peek on new song (boring.notch style)
+        // Only trigger if we're playing and the song actually changed
+        let songChanged = (title != lastPeekTitle || artist != lastPeekArtist) && !title.isEmpty
+        if songChanged && isPlaying {
+            print("🎵 NowPlayingService: Song changed! '\(lastPeekTitle)' -> '\(title)' - posting .songDidChange")
+            logger.info("Song changed: '\(self.lastPeekTitle)' -> '\(self.title)' by \(self.artist)")
+            NotificationCenter.default.post(name: .songDidChange, object: nil)
+        }
+
+        // Always update last peek values when we have valid data
+        if !title.isEmpty {
+            lastPeekTitle = title
+            lastPeekArtist = artist
+        }
     }
 
     // MARK: - Color Extraction
@@ -470,26 +389,104 @@ final class NowPlayingService: ObservableObject {
 
     /// Command codes: 0=Play, 1=Pause, 2=Toggle, 4=Next, 5=Previous
     func togglePlayPause() {
+        debugLog("togglePlayPause called")
+        logger.info("togglePlayPause called")
         MRMediaRemoteSendCommandFunction?(2, nil)
+        debugLog("togglePlayPause command sent")
     }
 
     func play() {
+        logger.info("play called")
         MRMediaRemoteSendCommandFunction?(0, nil)
     }
 
     func pause() {
+        logger.info("pause called")
         MRMediaRemoteSendCommandFunction?(1, nil)
     }
 
+    /// Play with a gentle volume fade-in (prevents jarring audio after Bluetooth codec switch)
+    /// Fades from 20% to original volume over ~1 second
+    func playWithFadeIn() {
+        logger.info("playWithFadeIn called")
+
+        Task { @MainActor in
+            // Get current system volume
+            let originalVolume = Self.getSystemVolume()
+            logger.info("Original volume: \(originalVolume)")
+
+            // Set volume low to start
+            Self.setSystemVolume(Int(Double(originalVolume) * 0.2))
+
+            // Start playback
+            play()
+
+            // Fade in over 1 second (5 steps, 200ms each)
+            let steps = 5
+            let stepDelay: UInt64 = 200_000_000  // 200ms
+
+            for i in 1...steps {
+                try? await Task.sleep(nanoseconds: stepDelay)
+                let progress = Double(i) / Double(steps)
+                let targetVolume = Int(Double(originalVolume) * (0.2 + 0.8 * progress))
+                Self.setSystemVolume(targetVolume)
+            }
+
+            logger.info("Fade-in complete, volume restored to \(originalVolume)")
+        }
+    }
+
+    /// Get system output volume (0-100)
+    private static func getSystemVolume() -> Int {
+        let script = "output volume of (get volume settings)"
+        var error: NSDictionary?
+        if let appleScript = NSAppleScript(source: script) {
+            let result = appleScript.executeAndReturnError(&error)
+            if error == nil {
+                return Int(result.int32Value)
+            }
+        }
+        return 50  // Default if unable to get
+    }
+
+    /// Set system output volume (0-100)
+    private static func setSystemVolume(_ volume: Int) {
+        let clampedVolume = max(0, min(100, volume))
+        let script = "set volume output volume \(clampedVolume)"
+        var error: NSDictionary?
+        if let appleScript = NSAppleScript(source: script) {
+            appleScript.executeAndReturnError(&error)
+        }
+    }
+
     func nextTrack() {
-        MRMediaRemoteSendCommandFunction?(4, nil)
+        debugLog("nextTrack called")
+        logger.info("nextTrack called")
+        if MRMediaRemoteSendCommandFunction == nil {
+            debugLog("ERROR: MRMediaRemoteSendCommandFunction is nil!")
+            logger.error("MRMediaRemoteSendCommandFunction is nil!")
+        } else {
+            debugLog("Sending next track command (4)")
+            MRMediaRemoteSendCommandFunction?(4, nil)
+            debugLog("nextTrack command sent")
+        }
     }
 
     func previousTrack() {
-        MRMediaRemoteSendCommandFunction?(5, nil)
+        debugLog("previousTrack called")
+        logger.info("previousTrack called")
+        if MRMediaRemoteSendCommandFunction == nil {
+            debugLog("ERROR: MRMediaRemoteSendCommandFunction is nil!")
+            logger.error("MRMediaRemoteSendCommandFunction is nil!")
+        } else {
+            debugLog("Sending previous track command (5)")
+            MRMediaRemoteSendCommandFunction?(5, nil)
+            debugLog("previousTrack command sent")
+        }
     }
 
     func seek(to time: TimeInterval) {
+        logger.info("seek called to \(time)")
         MRMediaRemoteSetElapsedTimeFunction?(time)
         elapsedTime = time
         lastUpdated = Date()
@@ -544,6 +541,13 @@ final class NowPlayingService: ObservableObject {
     }
 
     // MARK: - Computed Properties
+
+    /// Whether favorite/love can be toggled (Apple Music only)
+    var canFavorite: Bool {
+        bundleIdentifier == "com.apple.Music" &&
+        NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Music").isEmpty == false
+    }
+
     var progress: Double {
         guard duration > 0 else { return 0 }
         return elapsedTime / duration
@@ -569,5 +573,109 @@ final class NowPlayingService: ObservableObject {
         let timeDifference = date.timeIntervalSince(lastUpdated)
         let estimated = elapsedTime + (timeDifference * playbackRate)
         return min(max(0, estimated), duration)
+    }
+}
+
+// MARK: - JSON Parsing Types
+
+struct NowPlayingUpdate: Codable, Sendable {
+    let payload: NowPlayingPayload
+    let diff: Bool?
+}
+
+struct NowPlayingPayload: Codable, Sendable {
+    let title: String?
+    let artist: String?
+    let album: String?
+    let duration: Double?
+    let elapsedTime: Double?
+    let shuffleMode: Int?
+    let repeatMode: Int?
+    let artworkData: String?
+    let timestamp: String?
+    let playbackRate: Double?
+    let playing: Bool?
+    let parentApplicationBundleIdentifier: String?
+    let bundleIdentifier: String?
+    let volume: Double?
+}
+
+// MARK: - JSON Lines Pipe Handler
+
+actor JSONLinesPipeHandler {
+    private let pipe: Pipe
+    private let fileHandle: FileHandle
+    private var buffer = ""
+
+    init() {
+        self.pipe = Pipe()
+        self.fileHandle = pipe.fileHandleForReading
+    }
+
+    func getPipe() -> Pipe {
+        return pipe
+    }
+
+    func readJSONLines<T: Decodable & Sendable>(as type: T.Type, onLine: @escaping @Sendable (T) async -> Void) async {
+        do {
+            try await self.processLines(as: type) { decodedObject in
+                await onLine(decodedObject)
+            }
+        } catch {
+            print("Error processing JSON stream: \(error)")
+        }
+    }
+
+    private func processLines<T: Decodable & Sendable>(as type: T.Type, onLine: @escaping @Sendable (T) async -> Void) async throws {
+        while true {
+            let data = try await readData()
+            guard !data.isEmpty else { break }
+
+            if let chunk = String(data: data, encoding: .utf8) {
+                buffer.append(chunk)
+
+                while let range = buffer.range(of: "\n") {
+                    let line = String(buffer[..<range.lowerBound])
+                    buffer = String(buffer[range.upperBound...])
+
+                    if !line.isEmpty {
+                        await processJSONLine(line, as: type, onLine: onLine)
+                    }
+                }
+            }
+        }
+    }
+
+    private func processJSONLine<T: Decodable & Sendable>(_ line: String, as type: T.Type, onLine: @escaping @Sendable (T) async -> Void) async {
+        guard let data = line.data(using: .utf8) else {
+            return
+        }
+        do {
+            let decodedObject = try JSONDecoder().decode(T.self, from: data)
+            await onLine(decodedObject)
+        } catch {
+            // Ignore lines that can't be decoded
+        }
+    }
+
+    private func readData() async throws -> Data {
+        return try await withCheckedThrowingContinuation { continuation in
+
+            fileHandle.readabilityHandler = { handle in
+                let data = handle.availableData
+                handle.readabilityHandler = nil
+                continuation.resume(returning: data)
+            }
+        }
+    }
+
+    func close() async {
+        do {
+            fileHandle.readabilityHandler = nil
+            try fileHandle.close()
+            try pipe.fileHandleForWriting.close()
+        } catch {
+            print("Error closing pipe handler: \(error)")
+        }
     }
 }

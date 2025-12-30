@@ -52,6 +52,36 @@ fi
 # Clean up any stray plist from earlier builds
 rm -f "$CONTENTS_DIR/AssetCatalog-Info.plist"
 
+# Copy MediaRemoteAdapter resources for Now Playing
+MEDIA_ADAPTER_DIR="$ROOT_DIR/mediaremote-adapter"
+if [[ -d "$MEDIA_ADAPTER_DIR" ]]; then
+  echo "Copying MediaRemoteAdapter resources…"
+
+  # Create PrivateFrameworks directory
+  PRIVATE_FRAMEWORKS_DIR="$CONTENTS_DIR/Frameworks/PrivateFrameworks"
+  mkdir -p "$PRIVATE_FRAMEWORKS_DIR"
+
+  # Copy framework
+  if [[ -d "$MEDIA_ADAPTER_DIR/MediaRemoteAdapter.framework" ]]; then
+    cp -R "$MEDIA_ADAPTER_DIR/MediaRemoteAdapter.framework" "$PRIVATE_FRAMEWORKS_DIR/"
+    echo "  Copied MediaRemoteAdapter.framework"
+  fi
+
+  # Copy Perl script to Resources
+  if [[ -f "$MEDIA_ADAPTER_DIR/mediaremote-adapter.pl" ]]; then
+    cp "$MEDIA_ADAPTER_DIR/mediaremote-adapter.pl" "$RES_DIR/"
+    chmod +x "$RES_DIR/mediaremote-adapter.pl"
+    echo "  Copied mediaremote-adapter.pl"
+  fi
+
+  # Copy test client to Resources
+  if [[ -f "$MEDIA_ADAPTER_DIR/MediaRemoteAdapterTestClient" ]]; then
+    cp "$MEDIA_ADAPTER_DIR/MediaRemoteAdapterTestClient" "$RES_DIR/"
+    chmod +x "$RES_DIR/MediaRemoteAdapterTestClient"
+    echo "  Copied MediaRemoteAdapterTestClient"
+  fi
+fi
+
 echo "Ad-hoc codesigning (required for some macOS privacy prompts)…"
 # IMPORTANT:
 # TCC permissions are tied to the app's designated requirement (bundle id + signing identity).
@@ -86,9 +116,23 @@ EOF
 fi
 
 echo "Codesigning with identity: $SIGN_ID"
-# Sign the Mach-O first, then the bundle. Avoid ad-hoc and avoid silently swallowing failures.
-codesign --force --sign "$SIGN_ID" --timestamp=none "$MACOS_DIR/GrabThisApp"
-codesign --force --sign "$SIGN_ID" --timestamp=none "$APP_DIR"
+ENTITLEMENTS="$ROOT_DIR/GrabThisApp.entitlements"
+
+# Sign the MediaRemoteAdapter framework first (if present)
+if [[ -d "$CONTENTS_DIR/Frameworks/PrivateFrameworks/MediaRemoteAdapter.framework" ]]; then
+  echo "Signing MediaRemoteAdapter.framework…"
+  codesign --force --sign "$SIGN_ID" --timestamp=none "$CONTENTS_DIR/Frameworks/PrivateFrameworks/MediaRemoteAdapter.framework"
+fi
+
+# Sign test client (if present)
+if [[ -f "$RES_DIR/MediaRemoteAdapterTestClient" ]]; then
+  echo "Signing MediaRemoteAdapterTestClient…"
+  codesign --force --sign "$SIGN_ID" --timestamp=none "$RES_DIR/MediaRemoteAdapterTestClient"
+fi
+
+# Sign the main Mach-O, then the bundle
+codesign --force --sign "$SIGN_ID" --timestamp=none --entitlements "$ENTITLEMENTS" "$MACOS_DIR/GrabThisApp"
+codesign --force --sign "$SIGN_ID" --timestamp=none --entitlements "$ENTITLEMENTS" "$APP_DIR"
 
 echo "Done:"
 echo "  $APP_DIR"
