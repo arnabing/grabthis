@@ -1,4 +1,5 @@
 # GrabThis (macOS)
+![Uploading gif.gif…]()
 
 Push-to-talk dictation overlay for macOS with AI integration, inspired by [boring.notch](https://github.com/TheBoredTeam/boring.notch).
 
