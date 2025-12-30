@@ -1,127 +1,151 @@
-# GrabThis (macOS)
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/89a16caf-0667-4a8d-b0dd-752ee779a935" alt="GrabThis Demo" width="600"/>
+</p>
 
-https://github.com/user-attachments/assets/89a16caf-0667-4a8d-b0dd-752ee779a935
+<h1 align="center">GrabThis</h1>
 
+<p align="center">
+  <b>Push-to-talk voice AI that lives in your notch</b><br>
+  Hold fn, speak, release — your words appear exactly where you need them.
+</p>
 
+<p align="center">
+  <a href="https://github.com/arnabing/grabthis/releases">
+    <img src="https://img.shields.io/badge/Download-DMG-blue?style=for-the-badge" alt="Download DMG"/>
+  </a>
+  <img src="https://img.shields.io/badge/macOS-14%2B-black?style=for-the-badge" alt="macOS 14+"/>
+  <img src="https://img.shields.io/badge/Swift-6-orange?style=for-the-badge" alt="Swift 6"/>
+</p>
 
-Push-to-talk dictation overlay for macOS with AI integration, inspired by [boring.notch](https://github.com/TheBoredTeam/boring.notch).
+---
 
-## What it does
-- Hold `fn` (or fallback hotkey) to start a session
-- Shows live transcription in a floating notch overlay
-- On release: copies transcript and attempts auto-insert into the active app
-- Optional: Send transcript + screenshot to AI (Gemini 3 Flash) for context-aware responses
-- Multi-turn chat conversations with voice or text input
+## What is GrabThis?
+
+GrabThis transforms your MacBook's notch from a camera cutout into a **voice-powered AI assistant**. Hold the `fn` key, speak naturally, and watch your words flow directly into any app. Need more? Send your transcript + a screenshot to AI for context-aware responses.
+
+It's like having a personal stenographer who also happens to be connected to an AI brain.
+
+---
 
 ## Features
 
-### Notch UI (boring.notch inspired)
-- **Single continuous black island** that extends from the hardware notch
-- **Grow-from-top animation** when expanding (content scales from 0.8 to 1.0, anchored at top)
-- **First-launch rainbow glow animation** - traces the notch perimeter on app start
-- **Tab-based navigation** - Switch between Voice AI and Now Playing with visual tabs
-- **Split listening mode** on MacBooks with notch - pulsing dot on left, audio visualizer on right
-- **Smooth state transitions** between idle, listening, processing, and response states
-- **Hover to expand** - hover over closed notch to see last session or full controls
-
-### Now Playing (boring.notch style)
-- **Dynamic notch wings** - album art on left, 4-bar audio visualizer on right
-- **iOS 26-style morph** - album art morphs into mic icon during dictation
-- Supports **Apple Music** and **Spotify**
-- **Expanded view on hover** - large album art (100x100), track info, progress bar, and controls
-- Play/pause, next/prev, seek controls
-- **Auto-pause during dictation** - music pauses automatically when you hold fn, resumes after
-- Toggle in Settings → Media
+### Voice Dictation
+- **Push-to-talk** — Hold `fn` to record, release to transcribe & auto-insert
+- **On-device transcription** — Fast, private speech recognition (macOS 26+)
+- **Auto-punctuation** — Proper capitalization and punctuation, no "period" needed
+- **Smart auto-insert** — Pastes directly into the active app (Cursor, VS Code, browsers, etc.)
 
 ### AI Integration
-- **Gemini 3 Flash Preview** (`gemini-3-flash-preview`) for fast, context-aware responses
-- Screenshot analysis with transcript for visual context
-- Multi-turn conversation support with chat UI
-- Follow-up via voice (hold fn) or text input
+- **Screenshot + voice context** — Ask AI about what's on your screen
+- **Multi-turn conversations** — Follow up with voice or text
+- **Gemini Flash** — Fast responses powered by Google's latest model
 
-### Transcription
-- **macOS 26+**: On-device `SpeechAnalyzer` with `DictationTranscriber` for fast, private transcription with automatic punctuation
-- **macOS 14-15**: Cloud-based `SFSpeechRecognizer` fallback
-- **Anti-regression**: Tracks longest partial to prevent text from disappearing during re-evaluation
-- **Graceful stop**: Captures audio tail after key-up for complete words
+### Now Playing (boring.notch style)
+- **Dynamic notch wings** — Album art on left, audio visualizer on right
+- **Apple Music & Spotify** — Full playback controls in the notch
+- **Auto-pause during dictation** — Music pauses when you talk, resumes when done
 
-### Auto-insert (Cursor-friendly)
-- Skip activation if Cursor is already frontmost
-- Prefer robust Cmd+V injection (Cmd-down -> V-down/up -> Cmd-up)
-- Skip menu-based paste for Cursor (avoids menu bar flicker)
+### Beautiful UI
+- **Seamless notch integration** — Grows naturally from your MacBook's hardware notch
+- **Rainbow glow animation** — First-launch delight that traces the notch perimeter
+- **Tab navigation** — Switch between Voice AI and Now Playing
+- **Hover to expand** — See your last session or full controls on hover
 
-## Building / Running
+---
 
-Use the packaged `.app` bundle (not a raw SwiftPM executable) so macOS permissions behave correctly:
+## Installation
+
+### Download (Recommended)
+
+1. Download the latest `.dmg` from [**Releases**](https://github.com/arnabing/grabthis/releases)
+2. Drag **GrabThis.app** to Applications
+3. Open and grant permissions when prompted (Accessibility, Microphone, Screen Recording)
+
+> **Note:** On first launch, macOS may show a security dialog. Right-click the app → Open → Open to bypass Gatekeeper.
+
+### Build from Source
 
 ```bash
+# Clone the repo
+git clone https://github.com/arnabing/grabthis.git
+cd grabthis
+
+# Build and run (requires Xcode 16+)
 export GRABTHIS_CODESIGN_IDENTITY="Apple Development: Your Name (TEAMID)"
-scripts/build_app_bundle.sh
-open "build/GrabThisApp.app"
+./scripts/build_app_bundle.sh
+open build/GrabThisApp.app
 ```
 
-## Permissions / TCC
+**Requirements:**
+- macOS 14+ (Sonoma or later)
+- macOS 26+ recommended for on-device transcription
+- Xcode 16+ for building from source
 
-If permissions feel "lost" or you keep seeing prompts, it's almost always **app identity** (bundle id + signing) or launching multiple copies of the app. See:
+---
 
-- `docs/permissions.md`
+## Permissions
 
-## Architecture
+GrabThis needs a few permissions to work its magic:
 
-### Overlay Panel (OverlayPanel.swift)
-Uses the **boring.notch pattern** for animations:
-- Header is ALWAYS present (content changes based on state)
-- Body is ADDED when open (with `.transition(.scale(scale: 0.8, anchor: .top))`)
-- `effectiveClosedWidth` dynamically expands for Now Playing wings
-- This ensures transitions fire correctly on every open/close cycle
+| Permission | Why |
+|------------|-----|
+| **Accessibility** | Auto-insert text into apps |
+| **Microphone** | Voice transcription |
+| **Screen Recording** | Screenshot context for AI |
 
-### Tab System (NotchCoordinator.swift)
-- `NotchPage` enum: `.transcription` (Voice AI) or `.nowPlaying`
-- `NotchCoordinator` manages page state and music auto-detection
-- `NotchTabBar` provides visual tab switching in expanded view
-- Auto-switches to Now Playing when music starts (if on Voice AI tab)
+If permissions feel stuck, see [docs/permissions.md](docs/permissions.md).
 
-### Now Playing (NowPlayingService.swift)
-- Uses `MediaRemote.framework` (private API) + AppleScript fallback
-- Async notification streams for Apple Music and Spotify (boring.notch pattern)
-- `NowPlayingCompactView` - wings layout (album art + visualizer)
-- `NowPlayingExpandedView` - iOS 26-style player with large album art, controls, and progress
-
-### Animation Components
-- `NotchGlowAnimation` - Rainbow glow that traces the notch perimeter
-- `AudioSpectrumView` - 4-bar animated visualizer matching boring.notch (CABasicAnimation with autoreverses)
-- Rainbow gradient: blue -> purple -> red -> mint -> indigo -> pink -> blue
+---
 
 ## Troubleshooting
 
-### Auto-insert doesn't paste into Cursor
-Auto-insert uses a few strategies (AX insert, Edit -> Paste menu press, Cmd+V). Make sure:
-- System Settings -> Privacy & Security -> Accessibility: **grabthis ON**
-- Cursor is focused in an editor at key-up.
+<details>
+<summary><b>Auto-insert doesn't work in Cursor</b></summary>
 
-To inspect what happened:
+Make sure:
+- System Settings → Privacy & Security → Accessibility → **GrabThis ON**
+- Cursor is focused in an editor when you release `fn`
 
-```bash
-log show --last 5m --predicate 'process == "GrabThisApp" && (category == "autoInsert" || category == "session")' --style compact | tail -n 220
-```
-
-### Reset first-launch animation
-To see the glow animation again, quit and relaunch the app (it runs once per session).
-
-### Now Playing not showing
-1. Make sure **Settings → Media → Show Now Playing** is enabled
-2. Play music in Apple Music or Spotify
-3. Check debug logs:
-```bash
-log show --last 2m --predicate 'process == "GrabThisApp"' --style compact | grep "🎵"
-```
-
-### Settings
-Open settings from the menu bar icon or use Cmd+, when the app is focused.
-
-### Crash with long transcripts
-If the app crashes with very long transcripts, check the console:
+Debug logs:
 ```bash
 log show --last 5m --predicate 'process == "GrabThisApp"' --style compact | tail -n 100
 ```
-Report any crash logs as GitHub issues.
+</details>
+
+<details>
+<summary><b>Now Playing not showing</b></summary>
+
+1. Enable in **Settings → Media → Show Now Playing**
+2. Play music in Apple Music or Spotify
+3. Check logs: `log show --last 2m --predicate 'process == "GrabThisApp"' | grep "🎵"`
+</details>
+
+<details>
+<summary><b>Reset the rainbow glow animation</b></summary>
+
+The glow animation runs once per app launch. Quit and reopen to see it again.
+</details>
+
+---
+
+## Inspiration & Credits
+
+GrabThis stands on the shoulders of some incredible projects:
+
+- **[boring.notch](https://github.com/TheBoredTeam/boring.notch)** — The OG notch app that proved the MacBook notch could be beautiful. Our Now Playing wings, animation patterns, and overall notch philosophy are directly inspired by their work.
+
+- **[Alcove](https://tryalcove.com/)** — Showed us that the notch could be more than a media player — it could be a productivity powerhouse.
+
+- **[Wispr Flow](https://wisprflow.ai/)** — The gold standard for voice-to-text on Mac. Their push-to-talk UX inspired our `fn` key interaction model.
+
+---
+
+## License
+
+MIT — Use it, fork it, make it yours.
+
+---
+
+<p align="center">
+  Made with ❤️ and way too much coffee
+</p>
