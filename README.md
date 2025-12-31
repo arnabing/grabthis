@@ -1,8 +1,5 @@
 
-![gif](https://github.com/user-attachments/assets/e90c4d2c-2e82-463b-ad6d-fa9fc8a602ae)
-
-
-https://github.com/user-attachments/assets/ed6def3a-cd82-4323-abbe-a61fa5f558e6
+<p align="center">![gif](https://github.com/user-attachments/assets/e90c4d2c-2e82-463b-ad6d-fa9fc8a602ae)</p>
 
 
 <h1 align="center">GrabThis</h1>
