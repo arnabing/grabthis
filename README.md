@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/9885c17a-07ba-4fb8-978e-8f47f373ae2c" alt="GrabThis Demo" width="600"/>
+  <img src="
+
+https://github.com/user-attachments/assets/a73d8283-66b8-4f6b-a9e7-f8a64c41570e
+
+" alt="GrabThis Demo" width="600"/>
 </p>
 
 <h1 align="center">GrabThis</h1>
