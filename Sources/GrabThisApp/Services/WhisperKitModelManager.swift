@@ -88,13 +88,17 @@ final class WhisperKitModelManager: ObservableObject {
         return FileManager.default.fileExists(atPath: modelFolder.path)
     }
 
-    /// Get the directory where models are stored
-    func modelDirectory(for model: Model) -> URL {
+    /// Get the parent directory where all WhisperKit models are stored
+    func modelStorageDirectory() -> URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return appSupport
             .appendingPathComponent("grabthis", isDirectory: true)
             .appendingPathComponent("whisperkit", isDirectory: true)
-            .appendingPathComponent(model.rawValue, isDirectory: true)
+    }
+
+    /// Get the directory for a specific model
+    func modelDirectory(for model: Model) -> URL {
+        modelStorageDirectory().appendingPathComponent(model.rawValue, isDirectory: true)
     }
 
     /// Download a model
@@ -127,21 +131,22 @@ final class WhisperKitModelManager: ObservableObject {
         do {
             Log.stt.info("Starting WhisperKit model download: \(model.displayName)")
 
-            // Create the model directory
-            let modelDir = modelDirectory(for: model)
-            try FileManager.default.createDirectory(at: modelDir.deletingLastPathComponent(),
+            // Create the model storage directory
+            let storageDir = modelStorageDirectory()
+            try FileManager.default.createDirectory(at: storageDir,
                                                     withIntermediateDirectories: true)
 
-            // WhisperKit handles download automatically when initialized with a model variant
-            // The modelFolder parameter tells it where to store/look for models
+            // WhisperKit handles download automatically when initialized
+            // modelFolder is the parent directory where model subdirectories are stored
             let config = WhisperKitConfig(
                 model: model.rawValue,
-                modelFolder: modelDir.deletingLastPathComponent().path,
+                modelFolder: storageDir.path,
                 verbose: true,
-                prewarm: false
+                prewarm: false,
+                download: true
             )
 
-            Log.stt.info("Initializing WhisperKit (this downloads the model)...")
+            Log.stt.info("Initializing WhisperKit with modelFolder=\(storageDir.path), model=\(model.rawValue)")
             whisperKit = try await WhisperKit(config)
 
             downloadedModels.insert(model)

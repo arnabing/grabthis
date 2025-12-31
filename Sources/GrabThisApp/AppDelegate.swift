@@ -89,8 +89,9 @@ private extension AppDelegate {
         let hosting = NSHostingController(rootView: view)
         let window = NSWindow(contentViewController: hosting)
         window.title = "grabthis Settings"
-        window.setContentSize(NSSize(width: 400, height: 300))
-        window.styleMask = [.titled, .closable, .miniaturizable]
+        window.setContentSize(NSSize(width: 600, height: 500))
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        window.minSize = NSSize(width: 500, height: 400)
         window.isReleasedWhenClosed = false
 
         let wc = NSWindowController(window: window)
