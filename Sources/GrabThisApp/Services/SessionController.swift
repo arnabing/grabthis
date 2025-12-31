@@ -19,7 +19,7 @@ final class SessionController: ObservableObject {
     @Published var transcriptDraft: String = ""
     @Published private(set) var appContext: ActiveAppContext?
 
-    private let overlay: OverlayPanelController
+    private let overlay: OverlayPanelManager
     private let transcription: TranscriptionService
     private let aiService = AIService()
     private let history = SessionHistoryStore.shared
@@ -44,7 +44,7 @@ final class SessionController: ObservableObject {
     private var lastStateChangeTime: Date = .distantPast
     private let minStateChangeInterval: TimeInterval = 0.04  // 40ms minimum (reduced from 80ms for faster perceived response)
 
-    init(overlay: OverlayPanelController) {
+    init(overlay: OverlayPanelManager) {
         self.overlay = overlay
         self.transcription = TranscriptionService()
         self.overlay.presentIdleChip()
@@ -202,6 +202,14 @@ final class SessionController: ObservableObject {
         transcriptionTask = nil
         levelTask?.cancel()
         levelTask = nil
+
+        // For batch engines (WhisperKit), show transcribing state before processing
+        let isBatchEngine = !transcription.engineType.isStreaming
+        if isBatchEngine {
+            overlay.presentTranscribing()
+            Log.stt.info("Batch engine - showing transcribing overlay")
+        }
+
         Task { @MainActor in
             await self.transcription.stopAndFinalize()
             self.transcriptDraft = self.transcription.finalText.isEmpty ? self.transcription.partialText : self.transcription.finalText

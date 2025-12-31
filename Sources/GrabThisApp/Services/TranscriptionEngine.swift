@@ -5,6 +5,7 @@ import Foundation
 enum TranscriptionState: Equatable {
     case idle
     case listening
+    case processing  // For batch engines (WhisperKit) after recording stops
     case stopped
     case error(message: String)
 }
@@ -12,6 +13,8 @@ enum TranscriptionState: Equatable {
 /// Available STT engine types.
 enum TranscriptionEngineType: String, CaseIterable, Identifiable {
     case speechAnalyzer = "apple"
+    case whisperKit = "whisperkit"
+    case deepgram = "deepgram"
     case sfSpeech = "classic"
 
     var id: String { rawValue }
@@ -19,20 +22,51 @@ enum TranscriptionEngineType: String, CaseIterable, Identifiable {
     var displayName: String {
         switch self {
         case .speechAnalyzer: return "Apple (On-Device)"
-        case .sfSpeech: return "Classic (Cloud)"
+        case .whisperKit: return "WhisperKit (Local AI)"
+        case .deepgram: return "Deepgram Nova-3"
+        case .sfSpeech: return "Classic (Legacy)"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .speechAnalyzer: return "Free • Real-time • Private"
+        case .whisperKit: return "Free • ~400MB download • Private"
+        case .deepgram: return "Best accuracy (~4% WER) • $0.26/hr"
+        case .sfSpeech: return "Legacy cloud-based"
+        }
+    }
+
+    var accuracy: String {
+        switch self {
+        case .speechAnalyzer: return "Good"
+        case .whisperKit: return "Better (~7% WER)"
+        case .deepgram: return "Best (~4% WER)"
+        case .sfSpeech: return "Fair"
         }
     }
 
     var description: String {
         switch self {
         case .speechAnalyzer: return "Faster, private, works offline"
+        case .whisperKit: return "OpenAI Whisper via CoreML, best local accuracy"
+        case .deepgram: return "Cloud-based, highest accuracy available"
         case .sfSpeech: return "Legacy cloud-based recognition"
         }
     }
 
+    /// Whether this engine requires a model download before use
+    var requiresDownload: Bool { self == .whisperKit }
+
+    /// Whether this engine requires an API key
+    var requiresAPIKey: Bool { self == .deepgram }
+
+    /// Whether this engine provides streaming partial results
+    var isStreaming: Bool { self != .whisperKit }
+
     /// Returns only engine types available on the current macOS version.
     static var availableCases: [TranscriptionEngineType] {
-        var engines: [TranscriptionEngineType] = [.sfSpeech]
+        var engines: [TranscriptionEngineType] = [.whisperKit, .deepgram, .sfSpeech]
         if #available(macOS 26, *) {
             engines.insert(.speechAnalyzer, at: 0)
         }
@@ -47,7 +81,7 @@ enum TranscriptionEngineType: String, CaseIterable, Identifiable {
                 return true
             }
             return false
-        case .sfSpeech:
+        case .whisperKit, .deepgram, .sfSpeech:
             return true
         }
     }

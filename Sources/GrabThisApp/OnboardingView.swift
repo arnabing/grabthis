@@ -118,7 +118,7 @@ struct OnboardingView: View {
                     icon: "rectangle.dashed.badge.record",
                     title: "Screen Recording",
                     description: "Capture the active window so AI can see what you're looking at and provide contextual answers.",
-                    privacyNote: "Screenshots are only taken when you activate grabthis.",
+                    privacyNote: "Screenshots are captured only when you hold fn to dictate.",
                     isRequired: true,
                     onAllow: {
                         model.requestScreenRecording()
@@ -142,7 +142,7 @@ struct OnboardingView: View {
                                 .buttonStyle(.bordered)
                         }
                     }
-                    .padding(.bottom, 90)
+                    .padding(.bottom, 120)
                 }
             }
 

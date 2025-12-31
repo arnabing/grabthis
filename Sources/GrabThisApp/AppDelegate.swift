@@ -7,8 +7,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var onboardingWindowController: NSWindowController?
     private var settingsWindowController: NSWindowController?
     private var historyWindowController: NSWindowController?
-    private let overlay = OverlayPanelController()
-    private lazy var sessionController = SessionController(overlay: overlay)
+    private let overlayManager = OverlayPanelManager.shared
+    private lazy var sessionController = SessionController(overlay: overlayManager)
     private lazy var hotkeyService = HotkeyService(appState: AppState.shared) { [weak self] state in
         self?.handleHotkeyState(state)
     }
@@ -42,15 +42,15 @@ private extension AppDelegate {
             // no-op; idle transitions are driven by key up from listening.
             break
         case .listening:
-            overlay.model.onClose = { [weak self] in self?.sessionController.cancel() }
-            overlay.model.onSend = { [weak self] in self?.sessionController.sendToAI() }
-            overlay.model.onCopy = { [weak self] in self?.sessionController.copyTranscript() }
-            overlay.model.onInsert = { [weak self] in self?.sessionController.insertTranscript() }
-            overlay.model.onExpandScreenshot = { [weak self] in self?.overlay.showExpandedScreenshot() }
-            overlay.model.onFollowUp = { [weak self] in self?.sessionController.beginFollowUp() }
-            overlay.model.onTextFollowUp = { [weak self] text in self?.sessionController.sendTextFollowUp(text) }
-            overlay.model.onRemoveScreenshot = { [weak self] in self?.sessionController.removeScreenshot() }
-            overlay.model.onTranscriptEdit = { [weak self] text in self?.sessionController.updateTranscript(text) }
+            overlayManager.model.onClose = { [weak self] in self?.sessionController.cancel() }
+            overlayManager.model.onSend = { [weak self] in self?.sessionController.sendToAI() }
+            overlayManager.model.onCopy = { [weak self] in self?.sessionController.copyTranscript() }
+            overlayManager.model.onInsert = { [weak self] in self?.sessionController.insertTranscript() }
+            overlayManager.model.onExpandScreenshot = { [weak self] in self?.overlayManager.showExpandedScreenshot() }
+            overlayManager.model.onFollowUp = { [weak self] in self?.sessionController.beginFollowUp() }
+            overlayManager.model.onTextFollowUp = { [weak self] text in self?.sessionController.sendTextFollowUp(text) }
+            overlayManager.model.onRemoveScreenshot = { [weak self] in self?.sessionController.removeScreenshot() }
+            overlayManager.model.onTranscriptEdit = { [weak self] text in self?.sessionController.updateTranscript(text) }
             sessionController.begin()
         case .processing:
             sessionController.end()
@@ -147,8 +147,8 @@ private extension AppDelegate {
     }
 
     @objc func testOverlay() {
-        overlay.model.onClose = { [weak self] in self?.overlay.hide() }
-        overlay.presentListening(appName: "grabthis", screenshot: nil, transcript: "Say something…")
+        overlayManager.model.onClose = { [weak self] in self?.overlayManager.hide() }
+        overlayManager.presentListening(appName: "grabthis", screenshot: nil, transcript: "Say something…")
     }
 
     @objc func openScreenRecordingSettings() {

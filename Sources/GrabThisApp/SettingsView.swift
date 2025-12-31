@@ -94,28 +94,141 @@ struct SettingsView: View {
 private struct GeneralSettingsView: View {
     @ObservedObject var appState: AppState
     @Binding var selectedEngine: TranscriptionEngineType
+    @StateObject private var whisperKitManager = WhisperKitModelManager.shared
+    @State private var deepgramAPIKey: String = DeepgramService.getAPIKey() ?? ""
+    @State private var showingAPIKeySheet = false
 
     var body: some View {
         Form {
             Section {
-                Picker("Engine", selection: $selectedEngine) {
-                    ForEach(TranscriptionEngineType.availableCases) { engine in
-                        Text(engine.displayName).tag(engine)
-                    }
+                ForEach(TranscriptionEngineType.availableCases) { engine in
+                    EngineRow(
+                        engine: engine,
+                        isSelected: selectedEngine == engine,
+                        whisperKitManager: whisperKitManager,
+                        hasDeepgramKey: DeepgramService.hasAPIKey,
+                        onSelect: {
+                            guard selectedEngine != engine else { return }
+                            // Validate requirements before selecting
+                            if engine == .whisperKit && !whisperKitManager.isModelDownloaded(whisperKitManager.selectedModel) {
+                                // Allow selection but show download prompt
+                            }
+                            if engine == .deepgram && !DeepgramService.hasAPIKey {
+                                showingAPIKeySheet = true
+                                return
+                            }
+                            selectEngine(engine)
+                        },
+                        onDownload: {
+                            Task {
+                                do {
+                                    try await whisperKitManager.downloadModel(whisperKitManager.selectedModel)
+                                } catch {
+                                    Log.stt.error("Model download failed: \(error.localizedDescription)")
+                                }
+                            }
+                        },
+                        onAddAPIKey: {
+                            showingAPIKeySheet = true
+                        }
+                    )
                 }
-                .pickerStyle(.menu)
-                .onChange(of: selectedEngine) { oldValue, newValue in
-                    guard oldValue != newValue else { return }
-                    Log.stt.notice("⚙️ Settings: Engine changed from \(oldValue.displayName) → \(newValue.displayName)")
-                    UserDefaults.standard.set(newValue.rawValue, forKey: "sttEngineType")
-                    NotificationCenter.default.post(name: .sttEngineChanged, object: nil)
-                }
-
-                Text(selectedEngine.description)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             } header: {
                 Text("Speech Recognition")
+            } footer: {
+                Text("Apple = streaming, private. WhisperKit = batch, ~7% WER. Deepgram = streaming, ~4% WER.")
+                    .font(.caption)
+            }
+
+            // WhisperKit model picker (when selected or downloading)
+            if selectedEngine == .whisperKit || whisperKitManager.isDownloading {
+                Section {
+                    Picker("Model", selection: $whisperKitManager.selectedModel) {
+                        ForEach(WhisperKitModelManager.Model.allCases) { model in
+                            HStack {
+                                Text(model.displayName)
+                                Spacer()
+                                Text(model.sizeDescription)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .tag(model)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .disabled(whisperKitManager.isDownloading)
+
+                    if whisperKitManager.isDownloading {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("Downloading model...")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                Text("\(Int(whisperKitManager.downloadProgress * 100))%")
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                            ProgressView(value: whisperKitManager.downloadProgress)
+                                .tint(.accentColor)
+                        }
+                    }
+
+                    if let error = whisperKitManager.downloadError {
+                        HStack {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.red)
+                            Text(error)
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        }
+                    }
+
+                    if whisperKitManager.isModelDownloaded(whisperKitManager.selectedModel) {
+                        Button("Delete Model", role: .destructive) {
+                            try? whisperKitManager.deleteModel(whisperKitManager.selectedModel)
+                        }
+                    } else if !whisperKitManager.isDownloading {
+                        Button("Download \(whisperKitManager.selectedModel.sizeDescription)") {
+                            Task {
+                                do {
+                                    try await whisperKitManager.downloadModel(whisperKitManager.selectedModel)
+                                } catch {
+                                    Log.stt.error("Download failed: \(error.localizedDescription)")
+                                }
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                } header: {
+                    Text("WhisperKit Model")
+                } footer: {
+                    Text("Model will be downloaded from Hugging Face (~\(whisperKitManager.selectedModel.sizeDescription)).")
+                        .font(.caption)
+                }
+            }
+
+            // Deepgram API key (when selected)
+            if selectedEngine == .deepgram {
+                Section {
+                    SecureField("API Key", text: $deepgramAPIKey)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: deepgramAPIKey) { _, newValue in
+                            DeepgramService.setAPIKey(newValue)
+                        }
+
+                    Link(destination: URL(string: "https://deepgram.com/")!) {
+                        HStack {
+                            Text("Get API Key")
+                            Spacer()
+                            Image(systemName: "arrow.up.right.square")
+                        }
+                    }
+                } header: {
+                    Text("Deepgram API")
+                } footer: {
+                    Text("$200 free credit for new accounts. ~$0.26/hour for transcription.")
+                        .font(.caption)
+                }
             }
 
             Section {
@@ -129,7 +242,146 @@ private struct GeneralSettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .scrollDisabled(true)
+        .sheet(isPresented: $showingAPIKeySheet) {
+            DeepgramAPIKeySheet(apiKey: $deepgramAPIKey, isPresented: $showingAPIKeySheet) {
+                if !deepgramAPIKey.isEmpty {
+                    DeepgramService.setAPIKey(deepgramAPIKey)
+                    selectEngine(.deepgram)
+                }
+            }
+        }
+    }
+
+    private func selectEngine(_ engine: TranscriptionEngineType) {
+        Log.stt.notice("⚙️ Settings: Engine changed from \(selectedEngine.displayName) → \(engine.displayName)")
+        selectedEngine = engine
+        UserDefaults.standard.set(engine.rawValue, forKey: "sttEngineType")
+        NotificationCenter.default.post(name: .sttEngineChanged, object: nil)
+    }
+}
+
+// MARK: - Engine Row
+
+private struct EngineRow: View {
+    let engine: TranscriptionEngineType
+    let isSelected: Bool
+    @ObservedObject var whisperKitManager: WhisperKitModelManager
+    let hasDeepgramKey: Bool
+    let onSelect: () -> Void
+    let onDownload: () -> Void
+    let onAddAPIKey: () -> Void
+
+    private var needsSetup: Bool {
+        if engine == .whisperKit && !whisperKitManager.isModelDownloaded(whisperKitManager.selectedModel) {
+            return true
+        }
+        if engine == .deepgram && !hasDeepgramKey {
+            return true
+        }
+        return false
+    }
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(spacing: 12) {
+                // Selection indicator
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                    .font(.title3)
+
+                // Engine info
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(engine.displayName)
+                        .fontWeight(.medium)
+                        .foregroundStyle(.primary)
+                    Text(engine.subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                // Status / action button
+                if engine.requiresDownload {
+                    if whisperKitManager.isModelDownloaded(whisperKitManager.selectedModel) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                    } else if whisperKitManager.isDownloading {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Button("Download") {
+                            onDownload()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                }
+
+                if engine.requiresAPIKey {
+                    if hasDeepgramKey {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                    } else {
+                        Button("Add Key") {
+                            onAddAPIKey()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                }
+            }
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Deepgram API Key Sheet
+
+private struct DeepgramAPIKeySheet: View {
+    @Binding var apiKey: String
+    @Binding var isPresented: Bool
+    let onSave: () -> Void
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Text("Deepgram API Key")
+                .font(.headline)
+
+            Text("Enter your Deepgram API key to enable cloud transcription with ~4% WER accuracy.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+
+            SecureField("API Key", text: $apiKey)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 300)
+
+            Link(destination: URL(string: "https://deepgram.com/")!) {
+                HStack {
+                    Text("Get a free API key ($200 credit)")
+                    Image(systemName: "arrow.up.right.square")
+                }
+            }
+
+            HStack(spacing: 12) {
+                Button("Cancel") {
+                    isPresented = false
+                }
+                .buttonStyle(.bordered)
+
+                Button("Save") {
+                    onSave()
+                    isPresented = false
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(apiKey.isEmpty)
+            }
+        }
+        .padding(24)
+        .frame(width: 400)
     }
 }
 
@@ -137,6 +389,7 @@ private struct GeneralSettingsView: View {
 
 private struct MediaSettingsView: View {
     @AppStorage("nowPlayingEnabled") private var nowPlayingEnabled: Bool = true
+    @AppStorage("hideNotchInFullScreen") private var hideNotchInFullScreen: Bool = true
     @AppStorage("autoPauseMusicDuringDictation") private var autoPauseDuringDictation: Bool = true
     @ObservedObject private var nowPlaying = NowPlayingService.shared
 
@@ -145,7 +398,9 @@ private struct MediaSettingsView: View {
             Section {
                 Toggle("Show Now Playing", isOn: $nowPlayingEnabled.animation())
 
-                Text("Display music controls when Apple Music or Spotify is playing.")
+                Toggle("Hide in full screen", isOn: $hideNotchInFullScreen)
+
+                Text("Display music controls when playing. Hides notifications during full screen apps like YouTube or Netflix.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } header: {

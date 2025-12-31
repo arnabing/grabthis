@@ -136,6 +136,18 @@ final class TranscriptionService: ObservableObject {
                 Log.stt.notice("ENGINE ACTIVE: SFSpeech (cloud-based) - fallback")
             }
 
+        case .whisperKit:
+            let whisperKitEngine = WhisperKitTranscriptionEngine()
+            bindEngine(whisperKitEngine)
+            engine = whisperKitEngine
+            Log.stt.notice("ENGINE ACTIVE: WhisperKit (on-device, ~7% WER)")
+
+        case .deepgram:
+            let deepgramEngine = DeepgramTranscriptionEngine()
+            bindEngine(deepgramEngine)
+            engine = deepgramEngine
+            Log.stt.notice("ENGINE ACTIVE: Deepgram Nova-3 (cloud, ~4% WER)")
+
         case .sfSpeech:
             let sfEngine = SFSpeechTranscriptionEngine(locale: locale)
             bindEngine(sfEngine)

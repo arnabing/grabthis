@@ -79,8 +79,9 @@ final class OverlayPanelController {
         case hidden
         case idleChip
         case listening
+        case transcribing  // STT processing (WhisperKit batch transcription)
         case review
-        case processing
+        case processing    // AI processing
         case response
         case error
     }
@@ -91,7 +92,7 @@ final class OverlayPanelController {
             didSet {
                 // Set isOpen directly - animation is handled at call sites via withAnimation()
                 // This matches boring.notch's pattern where animation context is established BEFORE state changes
-                if mode == .listening || mode == .review || mode == .processing || mode == .response || mode == .error {
+                if mode == .listening || mode == .transcribing || mode == .review || mode == .processing || mode == .response || mode == .error {
                     isOpen = true
                 }
                 if mode == .idleChip || mode == .hidden {
@@ -164,7 +165,10 @@ final class OverlayPanelController {
         @Published var isRecordingFollowUp: Bool = false
     }
 
-    let model = Model()
+    let model: Model
+
+    /// The screen this panel is assigned to (nil = main screen)
+    private(set) var assignedScreen: NSScreen?
 
     private var panel: GrabThisWindow?
     private var hostingController: NSHostingController<OverlayRootView>?
@@ -176,7 +180,14 @@ final class OverlayPanelController {
 
     var isOverlayKeyWindow: Bool { panel?.isKeyWindow ?? false }
 
-    init() {
+    /// Create a panel controller for a specific screen with a shared model
+    /// - Parameters:
+    ///   - model: Shared model (all screens sync to same state)
+    ///   - screen: The screen to show the panel on (nil = main screen)
+    init(model: Model? = nil, screen: NSScreen? = nil) {
+        self.model = model ?? Model()
+        self.assignedScreen = screen
+
         // Subscribe to permission changes to keep accessibility status updated
         permissionCancellable = NotificationCenter.default.publisher(for: PermissionMonitor.accessibilityDidChange)
             .receive(on: DispatchQueue.main)
@@ -276,6 +287,14 @@ final class OverlayPanelController {
         model.accessibilityTrusted = trusted
     }
 
+    func presentTranscribing() {
+        cancelAutoDismiss()  // Don't auto-dismiss while transcribing
+        withAnimation(openAnimation) {
+            model.mode = .transcribing
+        }
+        show()
+    }
+
     func presentProcessing() {
         cancelAutoDismiss()  // Don't auto-dismiss while AI is processing
         withAnimation(openAnimation) {
@@ -286,6 +305,10 @@ final class OverlayPanelController {
 
     func presentResponse(_ text: String) {
         model.responseText = text
+        // Update close handler to just dismiss (session is complete, nothing to cancel)
+        model.onClose = { [weak self] in
+            self?.retractResponse()
+        }
         withAnimation(openAnimation) {
             model.mode = .response
         }
@@ -307,6 +330,12 @@ final class OverlayPanelController {
 
     func presentError(_ message: String) {
         model.responseText = message
+        // Update close handler to just dismiss (nothing to cancel on error)
+        model.onClose = { [weak self] in
+            withAnimation(closeAnimation) {
+                self?.model.isOpen = false
+            }
+        }
         withAnimation(openAnimation) {
             model.mode = .error
         }
@@ -317,7 +346,7 @@ final class OverlayPanelController {
     func showExpandedScreenshot() {
         // Check both current screenshot and last screenshot (for idle/history mode)
         let image = model.screenshot?.image ?? model.lastScreenshot?.image
-        guard let image, let screen = NSScreen.main else { return }
+        guard let image, let screen = assignedScreen ?? NSScreen.main else { return }
 
         // Cancel auto-dismiss timer while viewing expanded screenshot
         cancelAutoDismiss()
@@ -384,7 +413,7 @@ final class OverlayPanelController {
     }
 }
 
-private extension OverlayPanelController {
+extension OverlayPanelController {
     func show() {
         let isNewPanel = panel == nil
 
@@ -422,8 +451,8 @@ private extension OverlayPanelController {
             }
         }
 
-        // Update closed notch size for current screen
-        if let screen = NSScreen.main {
+        // Update closed notch size for assigned screen
+        if let screen = assignedScreen ?? NSScreen.main {
             model.closedNotchSize = getClosedNotchSize(screen: screen)
         }
 
@@ -444,7 +473,9 @@ private extension OverlayPanelController {
     }
 
     func positionWindow() {
-        guard let screen = NSScreen.main ?? NSScreen.screens.first, let p = panel else { return }
+        // Use assigned screen, fallback to main, then first available
+        guard let screen = assignedScreen ?? NSScreen.main ?? NSScreen.screens.first,
+              let p = panel else { return }
 
         // Update closed notch size for current screen
         model.closedNotchSize = getClosedNotchSize(screen: screen)
@@ -788,6 +819,19 @@ private struct OverlayRootView: View {
                     .transition(.opacity.animation(.easeInOut(duration: 0.2)))
                 }
             }
+        case .transcribing:
+            NotchHeader(
+                model: model,
+                statusColor: .cyan,
+                statusText: "Transcribing...",
+                showPulse: true,
+                showCloseButton: false,
+                rightContent: {
+                    ProgressView()
+                        .scaleEffect(0.7)
+                        .tint(.white)
+                }
+            )
         case .review:
             NotchHeader(
                 model: model,
@@ -841,6 +885,8 @@ private struct OverlayRootView: View {
             IdleBodyContent(model: model)
         case .listening, .review:
             ActiveSessionBodyContent(model: model)
+        case .transcribing:
+            TranscribingBodyContent(model: model)
         case .processing:
             ProcessingBodyContent()
         case .response:
@@ -1189,6 +1235,42 @@ private struct ActiveSessionBodyContent: View {
             onHover: { model.isHovering = $0 }
         )
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: model.mode)
+    }
+}
+
+/// Body content shown during WhisperKit batch transcription (after recording, before results)
+private struct TranscribingBodyContent: View {
+    @ObservedObject var model: OverlayPanelController.Model
+
+    var body: some View {
+        VStack(spacing: 12) {
+            // Show screenshot thumbnail if available (same as listening mode)
+            if let shot = model.screenshot {
+                Image(decorative: shot.image, scale: shot.scale)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxHeight: 80)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .strokeBorder(Color.white.opacity(0.1), lineWidth: 1)
+                    )
+            }
+
+            // Transcribing status with animated dots
+            HStack(spacing: 8) {
+                Text("Converting speech to text")
+                    .font(.body)
+                    .foregroundStyle(.white.opacity(0.6))
+
+                Spacer()
+            }
+
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 12)
     }
 }
 

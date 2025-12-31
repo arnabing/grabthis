@@ -1,5 +1,5 @@
-
-<p align="center">(https://github.com/user-attachments/assets/e90c4d2c-2e82-463b-ad6d-fa9fc8a602ae)
+<p align="center">
+  <img src="assets/demo.gif" alt="GrabThis Demo" width="600"/>
 </p>
 
 

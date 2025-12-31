@@ -72,9 +72,16 @@ final class NotchCoordinator: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 guard let self else { return }
-                // Don't show sneak peek if fn key is held (user is dictating)
-                // or if already hovering (notch is expanded)
+                // Don't show sneak peek if:
+                // - fn key is held (user is dictating)
+                // - already hovering (notch is expanded)
+                // - fullscreen app is active (watching movie/video)
                 guard !self.fnKeyHeld && !self.isHovering else { return }
+                let detector = FullScreenDetector.shared
+                guard !(detector.isEnabled && detector.isFullScreenAppActive) else {
+                    print("🎵 NotchCoordinator: Song changed but fullscreen app active - suppressing sneak peek")
+                    return
+                }
 
                 print("🎵 NotchCoordinator: Song changed - triggering sneak peek")
                 self.triggerSneakPeek()
