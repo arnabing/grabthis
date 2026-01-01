@@ -9,11 +9,18 @@ final class WhisperKitModelManager: ObservableObject {
     // MARK: - Model Types
 
     enum Model: String, CaseIterable, Identifiable {
-        case largev3Turbo = "openai_whisper-large-v3-turbo"
-        case largev3 = "openai_whisper-large-v3"
-        case base = "openai_whisper-base"
+        // WhisperKit model variant names - these must match the Hugging Face repo exactly
+        // The turbo models use underscore (large-v3_turbo), not hyphen (large-v3-turbo)
+        case largev3Turbo = "large-v3_turbo"
+        case largev3 = "large-v3"
+        case base = "base"
 
         var id: String { rawValue }
+
+        /// The full folder name as stored in Hugging Face cache
+        var folderName: String {
+            "openai_whisper-\(rawValue)"
+        }
 
         var displayName: String {
             switch self {
@@ -25,7 +32,7 @@ final class WhisperKitModelManager: ObservableObject {
 
         var sizeDescription: String {
             switch self {
-            case .largev3Turbo: return "~400MB"
+            case .largev3Turbo: return "~950MB"
             case .largev3: return "~1.5GB"
             case .base: return "~150MB"
             }
@@ -33,7 +40,7 @@ final class WhisperKitModelManager: ObservableObject {
 
         var sizeBytes: Int64 {
             switch self {
-            case .largev3Turbo: return 400_000_000
+            case .largev3Turbo: return 954_000_000
             case .largev3: return 1_500_000_000
             case .base: return 150_000_000
             }
@@ -73,6 +80,7 @@ final class WhisperKitModelManager: ObservableObject {
 
         // Check which models are already downloaded
         refreshDownloadedModels()
+        Log.stt.info("WhisperKit initialized: downloaded=\(self.downloadedModels.map { $0.rawValue }), selected=\(self.selectedModel.rawValue)")
     }
 
     // MARK: - Public API
@@ -82,23 +90,35 @@ final class WhisperKitModelManager: ObservableObject {
         downloadedModels = Set(Model.allCases.filter { isModelDownloaded($0) })
     }
 
-    /// Check if a model is downloaded on disk
+    /// Check if a model is downloaded on disk (checks WhisperKit's default cache)
     func isModelDownloaded(_ model: Model) -> Bool {
-        let modelFolder = modelDirectory(for: model)
-        return FileManager.default.fileExists(atPath: modelFolder.path)
+        // WhisperKit/Hub stores models in ~/Documents/huggingface/models/
+        // Check the model-specific folder using the full folder name
+        let modelPath = whisperKitCacheDirectory()
+            .appendingPathComponent("models/argmaxinc/whisperkit-coreml")
+            .appendingPathComponent(model.folderName)
+
+        // Check if the model directory exists and has actual model files
+        let audioEncoderPath = modelPath.appendingPathComponent("AudioEncoder.mlmodelc")
+        return FileManager.default.fileExists(atPath: audioEncoderPath.path)
     }
 
-    /// Get the parent directory where all WhisperKit models are stored
-    func modelStorageDirectory() -> URL {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return appSupport
-            .appendingPathComponent("grabthis", isDirectory: true)
-            .appendingPathComponent("whisperkit", isDirectory: true)
+    /// WhisperKit's default cache directory (Documents/huggingface per Hub package)
+    func whisperKitCacheDirectory() -> URL {
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        return documents.appendingPathComponent("huggingface", isDirectory: true)
     }
 
-    /// Get the directory for a specific model
-    func modelDirectory(for model: Model) -> URL {
-        modelStorageDirectory().appendingPathComponent(model.rawValue, isDirectory: true)
+    /// Get the directory for a specific model (in WhisperKit's cache)
+    func modelDirectory(for model: Model) -> URL? {
+        let modelPath = whisperKitCacheDirectory()
+            .appendingPathComponent("models/argmaxinc/whisperkit-coreml")
+            .appendingPathComponent(model.folderName)
+
+        if FileManager.default.fileExists(atPath: modelPath.path) {
+            return modelPath
+        }
+        return nil
     }
 
     /// Download a model
@@ -111,6 +131,7 @@ final class WhisperKitModelManager: ObservableObject {
         isDownloading = true
         downloadProgress = 0
         downloadError = nil
+        Log.stt.info("Starting WhisperKit model download: \(model.displayName)")
 
         // Start a simulated progress animation (WhisperKit doesn't expose download progress)
         let progressTask = Task { @MainActor in
@@ -129,24 +150,15 @@ final class WhisperKitModelManager: ObservableObject {
         }
 
         do {
-            Log.stt.info("Starting WhisperKit model download: \(model.displayName)")
-
-            // Create the model storage directory
-            let storageDir = modelStorageDirectory()
-            try FileManager.default.createDirectory(at: storageDir,
-                                                    withIntermediateDirectories: true)
-
-            // WhisperKit handles download automatically when initialized
-            // modelFolder is the parent directory where model subdirectories are stored
+            // DON'T provide modelFolder - this triggers WhisperKit to download from HuggingFace
+            // Models are cached in ~/Documents/huggingface/models/
             let config = WhisperKitConfig(
                 model: model.rawValue,
-                modelFolder: storageDir.path,
                 verbose: true,
                 prewarm: false,
                 download: true
             )
 
-            Log.stt.info("Initializing WhisperKit with modelFolder=\(storageDir.path), model=\(model.rawValue)")
             whisperKit = try await WhisperKit(config)
 
             downloadedModels.insert(model)
@@ -154,17 +166,17 @@ final class WhisperKitModelManager: ObservableObject {
             Log.stt.info("WhisperKit model downloaded: \(model.displayName)")
 
         } catch {
-            downloadError = error.localizedDescription
+            let errorDetail = String(describing: error)
+            downloadError = errorDetail
             downloadProgress = 0
-            Log.stt.error("WhisperKit model download failed: \(error.localizedDescription)")
+            Log.stt.error("WhisperKit model download failed for '\(model.rawValue)': \(errorDetail)")
             throw error
         }
     }
 
     /// Delete a downloaded model
     func deleteModel(_ model: Model) throws {
-        let modelDir = modelDirectory(for: model)
-        if FileManager.default.fileExists(atPath: modelDir.path) {
+        if let modelDir = modelDirectory(for: model) {
             try FileManager.default.removeItem(at: modelDir)
             downloadedModels.remove(model)
             Log.stt.info("WhisperKit model deleted: \(model.displayName)")
@@ -188,18 +200,31 @@ final class WhisperKitModelManager: ObservableObject {
             throw WhisperKitError.modelNotDownloaded
         }
 
-        // Load the model
-        let modelDir = modelDirectory(for: selectedModel)
+        // Get the model folder path where the model is cached
+        guard let modelFolder = modelDirectory(for: selectedModel) else {
+            Log.stt.error("Model directory not found for \(self.selectedModel.rawValue)")
+            throw WhisperKitError.modelNotDownloaded
+        }
+
+        Log.stt.info("Loading WhisperKit model from: \(modelFolder.path)")
+
+        // Load the model from the explicit folder path
         let config = WhisperKitConfig(
-            model: selectedModel.rawValue,
-            modelFolder: modelDir.deletingLastPathComponent().path,
+            modelFolder: modelFolder.path,
             verbose: false,
-            prewarm: true
+            prewarm: true,
+            download: false  // Don't re-download, just load from cache
         )
 
-        let kit = try await WhisperKit(config)
-        whisperKit = kit
-        return kit
+        do {
+            let kit = try await WhisperKit(config)
+            whisperKit = kit
+            Log.stt.info("WhisperKit model loaded successfully")
+            return kit
+        } catch {
+            Log.stt.error("WhisperKit model load failed: \(error.localizedDescription)")
+            throw error
+        }
     }
 
     /// Unload the current WhisperKit instance to free memory

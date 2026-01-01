@@ -5,7 +5,7 @@ import SwiftUI
 // MARK: - Settings Sections
 
 enum SettingsSection: String, CaseIterable, Identifiable {
-    case general = "General"
+    case general = "Voice AI"
     case media = "Media"
     case permissions = "Permissions"
     case about = "About"
@@ -14,7 +14,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
 
     var icon: String {
         switch self {
-        case .general: return "gearshape"
+        case .general: return "waveform"
         case .media: return "play.laptopcomputer"
         case .permissions: return "lock.shield"
         case .about: return "info.circle"
@@ -77,7 +77,7 @@ struct SettingsView: View {
                 AboutSettingsView()
             }
         }
-        .frame(width: 520, height: 480)
+        .frame(minWidth: 520, idealWidth: 600, minHeight: 480, idealHeight: 560)
         .onAppear { refreshPermissions() }
     }
 
@@ -97,6 +97,17 @@ private struct GeneralSettingsView: View {
     @StateObject private var whisperKitManager = WhisperKitModelManager.shared
     @State private var deepgramAPIKey: String = DeepgramService.getAPIKey() ?? ""
     @State private var showingAPIKeySheet = false
+    @AppStorage("hideLiveTranscription") private var hideLiveTranscription = false
+
+    private func debugLog(_ msg: String) {
+        let logFile = URL(fileURLWithPath: "/tmp/grabthis_debug.log")
+        let line = "[\(Date())] \(msg)\n"
+        if let data = line.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: logFile.path) {
+                if let h = try? FileHandle(forWritingTo: logFile) { h.seekToEndOfFile(); h.write(data); h.closeFile() }
+            } else { try? data.write(to: logFile) }
+        }
+    }
 
     var body: some View {
         Form {
@@ -120,11 +131,16 @@ private struct GeneralSettingsView: View {
                             selectEngine(engine)
                         },
                         onDownload: {
+                            debugLog("🟠 Download button clicked for model: \(whisperKitManager.selectedModel.rawValue)")
                             Task {
+                                debugLog("🟠 Task started for download")
                                 do {
                                     try await whisperKitManager.downloadModel(whisperKitManager.selectedModel)
+                                    debugLog("🟢 Download completed successfully")
                                 } catch {
-                                    Log.stt.error("Model download failed: \(error.localizedDescription)")
+                                    debugLog("🔴 Download failed with error: \(error)")
+                                    Log.stt.error("Model download failed: \(error)")
+                                    whisperKitManager.downloadError = "Download failed: \(error.localizedDescription)"
                                 }
                             }
                         },
@@ -189,11 +205,16 @@ private struct GeneralSettingsView: View {
                         }
                     } else if !whisperKitManager.isDownloading {
                         Button("Download \(whisperKitManager.selectedModel.sizeDescription)") {
+                            debugLog("🟠 Model picker download button clicked")
                             Task {
+                                debugLog("🟠 Model picker Task started")
                                 do {
                                     try await whisperKitManager.downloadModel(whisperKitManager.selectedModel)
+                                    debugLog("🟢 Model picker download completed")
                                 } catch {
-                                    Log.stt.error("Download failed: \(error.localizedDescription)")
+                                    debugLog("🔴 Model picker download failed: \(error)")
+                                    Log.stt.error("Download failed: \(error)")
+                                    whisperKitManager.downloadError = "Download failed: \(error.localizedDescription)"
                                 }
                             }
                         }
@@ -232,6 +253,16 @@ private struct GeneralSettingsView: View {
             }
 
             Section {
+                Toggle("Hide live transcription", isOn: $hideLiveTranscription)
+
+                Text("Hides text while speaking. Useful if you find it distracting.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("Display")
+            }
+
+            Section {
                 Toggle("Save screenshots to History", isOn: $appState.saveScreenshotsToHistory)
 
                 Text("Transcripts are always saved. Screenshots are optional.")
@@ -242,6 +273,12 @@ private struct GeneralSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .onAppear {
+            debugLog("🟢 GeneralSettingsView appeared")
+            debugLog("🟢 whisperKitManager.isDownloading = \(whisperKitManager.isDownloading)")
+            debugLog("🟢 whisperKitManager.selectedModel = \(whisperKitManager.selectedModel.rawValue)")
+            debugLog("🟢 isModelDownloaded = \(whisperKitManager.isModelDownloaded(whisperKitManager.selectedModel))")
+        }
         .sheet(isPresented: $showingAPIKeySheet) {
             DeepgramAPIKeySheet(apiKey: $deepgramAPIKey, isPresented: $showingAPIKeySheet) {
                 if !deepgramAPIKey.isEmpty {
@@ -453,7 +490,6 @@ private struct MediaSettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .scrollDisabled(true)
     }
 }
 
@@ -549,7 +585,6 @@ private struct PermissionsSettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .scrollDisabled(true)
     }
 
     /// Opens System Settings for the first missing required permission (excludes optional Automation)
@@ -660,6 +695,5 @@ private struct AboutSettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .scrollDisabled(true)
     }
 }

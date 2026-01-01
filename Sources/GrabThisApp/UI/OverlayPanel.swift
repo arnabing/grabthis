@@ -92,7 +92,13 @@ final class OverlayPanelController {
             didSet {
                 // Set isOpen directly - animation is handled at call sites via withAnimation()
                 // This matches boring.notch's pattern where animation context is established BEFORE state changes
-                if mode == .listening || mode == .transcribing || mode == .review || mode == .processing || mode == .response || mode == .error {
+                if mode == .listening {
+                    // Check if user wants to hide live transcription (minimal Wispr-style UX)
+                    let hideLiveTranscription = UserDefaults.standard.bool(forKey: "hideLiveTranscription")
+                    // For batch engines (WhisperKit) or when hiding transcription, stay in peek mode
+                    // Otherwise streaming engines expand to show live transcript
+                    isOpen = isStreamingEngine && !hideLiveTranscription
+                } else if mode == .transcribing || mode == .review || mode == .processing || mode == .response || mode == .error {
                     isOpen = true
                 }
                 if mode == .idleChip || mode == .hidden {
@@ -163,6 +169,10 @@ final class OverlayPanelController {
         // Chat input state (for live transcription in text field)
         @Published var followUpInputText: String = ""
         @Published var isRecordingFollowUp: Bool = false
+
+        // Batch vs streaming engine state
+        @Published var isStreamingEngine: Bool = true  // false for WhisperKit
+        @Published var recordingStartTime: Date?
     }
 
     let model: Model
@@ -247,10 +257,13 @@ final class OverlayPanelController {
         show()
     }
 
-    func presentListening(appName: String, screenshot: ScreenshotCaptureResult?, transcript: String) {
+    func presentListening(appName: String, screenshot: ScreenshotCaptureResult?, transcript: String, isStreaming: Bool = true) {
         model.appName = appName
         model.screenshot = screenshot
         model.transcript = transcript
+        // Set isStreamingEngine BEFORE mode change (didSet uses it to decide isOpen)
+        model.isStreamingEngine = isStreaming
+        model.recordingStartTime = Date()
         // Clear last session info when starting new session
         model.lastTranscript = ""
         model.lastAppName = ""
@@ -802,22 +815,20 @@ private struct OverlayRootView: View {
                 }
             }
         case .listening:
-            // Use Group + transition for smooth switching between split and header views
-            Group {
-                if model.hasPhysicalNotch && !model.isOpen {
-                    ListeningSplitContent(model: model)
-                        .transition(.opacity.animation(.easeInOut(duration: 0.2)))
-                } else {
-                    NotchHeader(
-                        model: model,
-                        statusColor: .cyan,
-                        statusText: "Listening...",
-                        showPulse: true,
-                        showCloseButton: false,
-                        rightContent: { EmptyView() }
-                    )
-                    .transition(.opacity.animation(.easeInOut(duration: 0.2)))
-                }
+            // Always show split content on notch Macs - no expansion on hover during recording
+            // This prevents the confusing "expanded listening" state
+            if model.hasPhysicalNotch {
+                ListeningSplitContent(model: model)
+            } else {
+                // Non-notch Macs: simple header
+                NotchHeader(
+                    model: model,
+                    statusColor: .cyan,
+                    statusText: "Listening...",
+                    showPulse: true,
+                    showCloseButton: false,
+                    rightContent: { EmptyView() }
+                )
             }
         case .transcribing:
             NotchHeader(
@@ -1210,30 +1221,52 @@ private struct IdleBodyContent: View {
 
 private struct ActiveSessionBodyContent: View {
     @ObservedObject var model: OverlayPanelController.Model
+    @AppStorage("hideLiveTranscription") private var hideLiveTranscription = false
 
     private var isListening: Bool { model.mode == .listening }
     private var isReady: Bool { model.mode == .review }
 
     var body: some View {
-        TranscriptActionsBody(
-            transcript: Binding(
-                get: { model.transcript },
-                set: { newValue in
-                    model.transcript = newValue
-                    model.onTranscriptEdit?(newValue)
+        VStack(spacing: 12) {
+            // Show audio level visualizer when listening
+            if isListening {
+                HStack(spacing: 12) {
+                    PillVisualizer(level: model.audioLevel)
+                    Text(hideLiveTranscription ? "Recording..." : "Speak now...")
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.6))
+                    Spacer()
                 }
-            ),
-            placeholderText: isListening ? "Speak now..." : "No transcript",
-            screenshot: isReady ? model.screenshot?.image : nil,
-            showButtons: isReady,
-            isEditable: isReady,  // Editable only in review mode
-            onExpandScreenshot: model.onExpandScreenshot,
-            onRemoveScreenshot: model.onRemoveScreenshot,
-            onInsert: model.onInsert,
-            onCopy: model.onCopy,
-            onSend: model.onSend,
-            onHover: { model.isHovering = $0 }
-        )
+                .padding(.horizontal, 4)
+            }
+
+            // Hide transcript during listening if user enabled "Hide live transcription"
+            // Still show in review mode so they can see/edit the result
+            if !(hideLiveTranscription && isListening) {
+                TranscriptActionsBody(
+                    transcript: Binding(
+                        get: { model.transcript },
+                        set: { newValue in
+                            model.transcript = newValue
+                            model.onTranscriptEdit?(newValue)
+                        }
+                    ),
+                    placeholderText: isListening ? "" : "No transcript",  // Empty placeholder since we show visualizer above
+                    screenshot: isReady ? model.screenshot?.image : nil,
+                    showButtons: isReady,
+                    isEditable: isReady,  // Editable only in review mode
+                    onExpandScreenshot: model.onExpandScreenshot,
+                    onRemoveScreenshot: model.onRemoveScreenshot,
+                    onInsert: model.onInsert,
+                    onCopy: model.onCopy,
+                    onSend: model.onSend,
+                    onHover: { model.isHovering = $0 }
+                )
+            } else {
+                // Spacer to maintain layout when transcript is hidden
+                Spacer()
+            }
+        }
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: model.mode)
     }
 }
@@ -1244,20 +1277,7 @@ private struct TranscribingBodyContent: View {
 
     var body: some View {
         VStack(spacing: 12) {
-            // Show screenshot thumbnail if available (same as listening mode)
-            if let shot = model.screenshot {
-                Image(decorative: shot.image, scale: shot.scale)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(maxHeight: 80)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .strokeBorder(Color.white.opacity(0.1), lineWidth: 1)
-                    )
-            }
-
-            // Transcribing status with animated dots
+            // Simple status message - no screenshot (it's confusing here)
             HStack(spacing: 8) {
                 Text("Converting speech to text")
                     .font(.body)
@@ -1488,37 +1508,55 @@ private struct ChatResponseView: View {
 private struct ListeningSplitContent: View {
     @ObservedObject var model: OverlayPanelController.Model
     @State private var pulse = false
+    @State private var elapsedTime: TimeInterval = 0
+    let timer = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
 
     var body: some View {
         HStack(spacing: 0) {
-            // LEFT: Expands to left screen edge
-            HStack {
-                Spacer()
+            // LEFT: Pulsing dot + "Listening" + timer (content-hugging)
+            HStack(spacing: 6) {
                 Circle()
                     .fill(Color.cyan.opacity(0.95))
-                    .frame(width: 10, height: 10)
-                    .scaleEffect(pulse ? 1.4 : 1.0)
+                    .frame(width: 8, height: 8)
+                    .scaleEffect(pulse ? 1.3 : 1.0)
                     .opacity(pulse ? 0.6 : 1.0)
-                    .onAppear {
-                        withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
-                            pulse = true
-                        }
-                    }
-                    .padding(.trailing, 8)
+                Text("Listening")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.8))
+                Text(formatTime(elapsedTime))
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.6))
             }
-            .frame(maxWidth: .infinity)  // Expand to fill left of notch
+            .padding(.leading, 6)  // Prevent left dot from being cut off
+            .padding(.trailing, 4)
 
-            // CENTER: Black spacer (the notch gap) - exact notch width
+            // CENTER: The notch gap - exact notch width
             Rectangle()
                 .fill(.black)
                 .frame(width: model.closedNotchSize.width)
 
-            // RIGHT: Expands to right screen edge (empty for symmetry)
-            Spacer()
-                .frame(maxWidth: .infinity)
+            // RIGHT: Waveform visualizer (content-hugging)
+            CompactWaveformView(audioLevel: model.audioLevel)
+                .padding(.leading, 4)
+                .padding(.trailing, 6)  // Balance with left padding
         }
         .frame(height: model.closedNotchSize.height)
-        .animation(.spring(response: 0.30, dampingFraction: 0.78), value: model.audioLevel)
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
+                pulse = true
+            }
+        }
+        .onReceive(timer) { _ in
+            if let start = model.recordingStartTime {
+                elapsedTime = Date().timeIntervalSince(start)
+            }
+        }
+    }
+
+    private func formatTime(_ interval: TimeInterval) -> String {
+        let mins = Int(interval) / 60
+        let secs = Int(interval) % 60
+        return String(format: "%d:%02d", mins, secs)
     }
 }
 

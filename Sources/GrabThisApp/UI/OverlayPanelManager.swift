@@ -86,9 +86,9 @@ final class OverlayPanelManager {
         }
     }
 
-    func presentListening(appName: String, screenshot: ScreenshotCaptureResult?, transcript: String) {
+    func presentListening(appName: String, screenshot: ScreenshotCaptureResult?, transcript: String, isStreaming: Bool = true) {
         for panel in allPanels {
-            panel.presentListening(appName: appName, screenshot: screenshot, transcript: transcript)
+            panel.presentListening(appName: appName, screenshot: screenshot, transcript: transcript, isStreaming: isStreaming)
         }
     }
 

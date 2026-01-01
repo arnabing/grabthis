@@ -81,6 +81,13 @@ final class TranscriptionService: ObservableObject {
 
     func stopAndFinalize(tailNanoseconds: UInt64 = 180_000_000, finalWaitNanoseconds: UInt64 = 650_000_000) async {
         await engine?.stopAndFinalize(tailNanoseconds: tailNanoseconds, finalWaitNanoseconds: finalWaitNanoseconds)
+        // Explicitly sync state after engine finishes - don't rely on async Combine publisher
+        if let engine {
+            self.state = engine.state
+            self.partialText = engine.partialText
+            self.finalText = engine.finalText
+            Log.stt.info("📝 TranscriptionService post-stop sync: final='\(self.finalText.prefix(50))'")
+        }
     }
 
     func reset() {
@@ -179,8 +186,8 @@ final class TranscriptionService: ObservableObject {
         self.finalText = engine.finalText
 
         // Debug log to verify values are syncing correctly
-        if !finalText.isEmpty || !partialText.isEmpty {
-            Log.stt.debug("🔄 sync: state=\(String(describing: self.state)) partial=\(self.partialText.prefix(30))... final=\(self.finalText.prefix(30))...")
+        if !finalText.isEmpty || !partialText.isEmpty || state == .stopped {
+            Log.stt.info("🔄 TranscriptionService sync: state=\(String(describing: self.state)) partial='\(self.partialText.prefix(30))' final='\(self.finalText.prefix(30))'")
         }
     }
 }

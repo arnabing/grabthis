@@ -115,7 +115,8 @@ final class SessionController: ObservableObject {
         overlay.presentListening(
             appName: appContext?.appName ?? "Unknown",
             screenshot: nil,
-            transcript: ""
+            transcript: "",
+            isStreaming: transcription.engineType.isStreaming
         )
         phase = .listening
 
@@ -212,7 +213,9 @@ final class SessionController: ObservableObject {
 
         Task { @MainActor in
             await self.transcription.stopAndFinalize()
+            Log.stt.info("📝 SessionController after stopAndFinalize: finalText='\(self.transcription.finalText.prefix(50))' partialText='\(self.transcription.partialText.prefix(50))'")
             self.transcriptDraft = self.transcription.finalText.isEmpty ? self.transcription.partialText : self.transcription.finalText
+            Log.stt.info("📝 SessionController transcriptDraft set to: '\(self.transcriptDraft.prefix(50))'")
             // FIX: Update overlay transcript IMMEDIATELY to prevent blank state during auto-insert delay
             self.overlay.updateListening(transcript: self.transcriptDraft)
             self.overlay.setAccessibilityTrusted(AutoInsertService.isAccessibilityTrusted())

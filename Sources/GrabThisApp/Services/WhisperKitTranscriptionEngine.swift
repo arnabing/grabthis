@@ -16,6 +16,22 @@ final class WhisperKitTranscriptionEngine: ObservableObject, TranscriptionEngine
     private var audioBuffer: [Float] = []
     private var audioConverter: AVAudioConverter?
     private let modelManager = WhisperKitModelManager.shared
+    private var preloadTask: Task<Void, Never>?
+
+    // MARK: - Initialization
+
+    init() {
+        // Start preloading the model in the background
+        preloadTask = Task { @MainActor in
+            do {
+                Log.stt.info("WhisperKit: Preloading model in background...")
+                self.whisperKit = try await self.modelManager.getWhisperKit()
+                Log.stt.info("WhisperKit: Model preloaded and ready")
+            } catch {
+                Log.stt.warning("WhisperKit: Preload failed (will retry on first use): \(error.localizedDescription)")
+            }
+        }
+    }
 
     // MARK: - TranscriptionEngine Protocol
 
@@ -30,13 +46,26 @@ final class WhisperKitTranscriptionEngine: ObservableObject, TranscriptionEngine
         finalText = ""
         audioBuffer = []
 
-        // Load WhisperKit model if needed
-        do {
-            whisperKit = try await modelManager.getWhisperKit()
-        } catch {
-            state = .error(message: "Failed to load WhisperKit model: \(error.localizedDescription)")
-            Log.stt.error("WhisperKit model load failed: \(error.localizedDescription)")
-            throw error
+        // FAST CHECK: Model must already be loaded to start recording
+        // We don't wait indefinitely for preload - if model isn't ready, fail fast
+        if whisperKit == nil {
+            // Give preload a short window to finish (200ms) in case it just completed
+            try? await Task.sleep(nanoseconds: 200_000_000)
+
+            // Check again - did preload complete?
+            if whisperKit == nil {
+                // Model not ready - check if it's even downloaded
+                if !modelManager.isModelDownloaded(modelManager.selectedModel) {
+                    state = .error(message: "WhisperKit model not downloaded. Go to Settings to download.")
+                    Log.stt.error("WhisperKit: Model not downloaded")
+                    throw WhisperKitError.modelNotDownloaded
+                } else {
+                    // Model is downloaded but not loaded yet - still initializing
+                    state = .error(message: "WhisperKit model still loading. Please wait a moment and try again.")
+                    Log.stt.warning("WhisperKit: Model not ready (still loading in background)")
+                    throw WhisperKitError.transcriptionFailed("Model still loading - please wait")
+                }
+            }
         }
 
         // Setup audio capture
@@ -64,10 +93,18 @@ final class WhisperKitTranscriptionEngine: ObservableObject, TranscriptionEngine
         }
         self.audioConverter = converter
 
-        // Install audio tap
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
-            self?.processAudioBuffer(buffer, converter: converter, targetFormat: targetFormat)
-        }
+        // Install audio tap - must use nonisolated static function to avoid MainActor inference
+        // The tap closure runs on a real-time audio thread and cannot call @MainActor methods
+        let tap = Self.makeTapBlock(
+            converter: converter,
+            targetFormat: targetFormat,
+            appendSamples: { [weak self] samples in
+                Task { @MainActor in
+                    self?.audioBuffer.append(contentsOf: samples)
+                }
+            }
+        )
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat, block: tap)
 
         // Start audio engine
         audioEngine.prepare()
@@ -127,13 +164,17 @@ final class WhisperKitTranscriptionEngine: ObservableObject, TranscriptionEngine
             let results = try await self.whisperKit!.transcribe(audioArray: audioToTranscribe)
 
             // Combine all segment texts
-            finalText = results
+            let transcribedText = results
                 .map { $0.text }
                 .joined(separator: " ")
                 .trimmingCharacters(in: .whitespaces)
 
             let elapsed = Date().timeIntervalSince(startTime)
-            Log.stt.info("WhisperKit transcription complete in \(String(format: "%.2f", elapsed))s: \(self.finalText.prefix(50))...")
+            Log.stt.info("WhisperKit transcription complete in \(String(format: "%.2f", elapsed))s: \(transcribedText.prefix(50))...")
+
+            // Set finalText AFTER logging to ensure value is captured
+            self.finalText = transcribedText
+            Log.stt.info("WhisperKit finalText set to: \(self.finalText.prefix(100))...")
 
             state = .stopped
 
@@ -157,61 +198,84 @@ final class WhisperKitTranscriptionEngine: ObservableObject, TranscriptionEngine
         state = .idle
     }
 
-    // MARK: - Private Methods
+    // MARK: - Private Methods (nonisolated for audio thread safety)
 
-    private func processAudioBuffer(_ buffer: AVAudioPCMBuffer, converter: AVAudioConverter, targetFormat: AVAudioFormat) {
-        // Calculate output buffer size
-        let inputFrames = buffer.frameLength
-        let sampleRateRatio = targetFormat.sampleRate / buffer.format.sampleRate
-        let outputFrameCapacity = AVAudioFrameCount(Double(inputFrames) * sampleRateRatio) + 1
-
-        // Create output buffer
-        guard let convertedBuffer = AVAudioPCMBuffer(
-            pcmFormat: targetFormat,
-            frameCapacity: outputFrameCapacity
-        ) else { return }
-
-        // Convert audio
-        var error: NSError?
-        var inputBufferConsumed = false
-        converter.convert(to: convertedBuffer, error: &error) { _, outStatus in
-            if inputBufferConsumed {
-                outStatus.pointee = .noDataNow
-                return nil
-            }
-            inputBufferConsumed = true
-            outStatus.pointee = .haveData
-            return buffer
-        }
-
-        guard error == nil, convertedBuffer.frameLength > 0 else { return }
-
-        // Extract float samples and append to buffer
-        if let channelData = convertedBuffer.floatChannelData?[0] {
-            let frames = Int(convertedBuffer.frameLength)
-            let samples = Array(UnsafeBufferPointer(start: channelData, count: frames))
-
-            // Append on main actor
-            Task { @MainActor in
-                self.audioBuffer.append(contentsOf: samples)
-            }
-
-            // Feed AudioLevelService for waveform visualization
-            let rms = computeRMS(convertedBuffer)
+    /// Creates the audio tap block in a nonisolated context to prevent @MainActor inference.
+    /// This is critical because the audio tap callback runs on a real-time audio thread.
+    nonisolated static func makeTapBlock(
+        converter: AVAudioConverter,
+        targetFormat: AVAudioFormat,
+        appendSamples: @escaping @Sendable ([Float]) -> Void
+    ) -> (AVAudioPCMBuffer, AVAudioTime) -> Void {
+        { buffer, _ in
+            // Feed AudioLevelService for waveform visualization (safe for audio thread)
+            let rms = computeRMS(buffer)
             AudioLevelService.ingestFromAudioThread(rms: rms)
+
+            // Calculate output buffer size
+            let inputFrames = buffer.frameLength
+            let sampleRateRatio = targetFormat.sampleRate / buffer.format.sampleRate
+            let outputFrameCapacity = AVAudioFrameCount(Double(inputFrames) * sampleRateRatio) + 1
+
+            // Create output buffer
+            guard let convertedBuffer = AVAudioPCMBuffer(
+                pcmFormat: targetFormat,
+                frameCapacity: outputFrameCapacity
+            ) else { return }
+
+            // Convert audio
+            var error: NSError?
+            var inputBufferConsumed = false
+            converter.convert(to: convertedBuffer, error: &error) { _, outStatus in
+                if inputBufferConsumed {
+                    outStatus.pointee = .noDataNow
+                    return nil
+                }
+                inputBufferConsumed = true
+                outStatus.pointee = .haveData
+                return buffer
+            }
+
+            guard error == nil, convertedBuffer.frameLength > 0 else { return }
+
+            // Extract float samples and pass to callback
+            if let channelData = convertedBuffer.floatChannelData?[0] {
+                let frames = Int(convertedBuffer.frameLength)
+                let samples = Array(UnsafeBufferPointer(start: channelData, count: frames))
+                appendSamples(samples)
+            }
         }
     }
 
-    private nonisolated func computeRMS(_ buffer: AVAudioPCMBuffer) -> Float {
-        guard let data = buffer.floatChannelData?[0] else { return 0 }
-        let count = Int(buffer.frameLength)
-        guard count > 0 else { return 0 }
+    nonisolated static func computeRMS(_ buffer: AVAudioPCMBuffer) -> Float {
+        // Try float channel data first
+        if let data = buffer.floatChannelData?[0] {
+            let count = Int(buffer.frameLength)
+            guard count > 0 else { return 0 }
 
-        var sum: Float = 0
-        for i in 0..<count {
-            let v = data[i]
-            sum += v * v
+            var sum: Float = 0
+            for i in 0..<count {
+                let v = data[i]
+                sum += v * v
+            }
+            return sqrt(sum / Float(count))
         }
-        return sqrt(sum / Float(count))
+
+        // Try int16 channel data (common for microphone input)
+        if let data = buffer.int16ChannelData?[0] {
+            let count = Int(buffer.frameLength)
+            guard count > 0 else { return 0 }
+
+            var sum: Float = 0
+            for i in 0..<count {
+                // Normalize int16 (-32768...32767) to float (-1...1)
+                let v = Float(data[i]) / 32768.0
+                sum += v * v
+            }
+            return sqrt(sum / Float(count))
+        }
+
+        // No usable channel data
+        return 0
     }
 }

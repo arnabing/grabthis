@@ -14,6 +14,9 @@ final class DeepgramTranscriptionEngine: ObservableObject, TranscriptionEngine {
     private var audioConverter: AVAudioConverter?
     private var receiveTask: Task<Void, Never>?
 
+    /// Accumulated finalized segments (Deepgram sends multiple final segments during streaming)
+    private var accumulatedFinalText: String = ""
+
     // MARK: - TranscriptionEngine Protocol
 
     func start() async throws {
@@ -31,6 +34,7 @@ final class DeepgramTranscriptionEngine: ObservableObject, TranscriptionEngine {
         // Reset state
         partialText = ""
         finalText = ""
+        accumulatedFinalText = ""
 
         // Connect to Deepgram
         do {
@@ -49,16 +53,21 @@ final class DeepgramTranscriptionEngine: ObservableObject, TranscriptionEngine {
 
                 await MainActor.run {
                     if result.isFinal {
-                        // Append to final text
-                        if self.finalText.isEmpty {
-                            self.finalText = result.text
+                        // Append to accumulated final text
+                        if self.accumulatedFinalText.isEmpty {
+                            self.accumulatedFinalText = result.text
                         } else {
-                            self.finalText += " " + result.text
+                            self.accumulatedFinalText += " " + result.text
                         }
-                        self.partialText = ""
+                        // Update partialText to show full accumulated text (UI subscribes to this)
+                        self.partialText = self.accumulatedFinalText
                     } else {
-                        // Update partial text
-                        self.partialText = result.text
+                        // Show accumulated final + current interim for smooth display
+                        if self.accumulatedFinalText.isEmpty {
+                            self.partialText = result.text
+                        } else {
+                            self.partialText = self.accumulatedFinalText + " " + result.text
+                        }
                     }
                 }
             }
@@ -89,10 +98,10 @@ final class DeepgramTranscriptionEngine: ObservableObject, TranscriptionEngine {
         }
         self.audioConverter = converter
 
-        // Install audio tap
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat) { [weak self] buffer, _ in
-            self?.processAudioBuffer(buffer, converter: converter, targetFormat: targetFormat)
-        }
+        // Install audio tap - must use nonisolated static function to avoid MainActor inference
+        // The tap closure runs on a real-time audio thread and cannot call @MainActor methods
+        let tap = Self.makeTapBlock(deepgram: deepgram, converter: converter, targetFormat: targetFormat)
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: inputFormat, block: tap)
 
         // Start audio engine
         audioEngine.prepare()
@@ -139,11 +148,8 @@ final class DeepgramTranscriptionEngine: ObservableObject, TranscriptionEngine {
         // Disconnect
         await deepgram.disconnect()
 
-        // If we only have partial text, promote it to final
-        if finalText.isEmpty && !partialText.isEmpty {
-            finalText = partialText
-            partialText = ""
-        }
+        // Set finalText from accumulated text (partialText contains the full running transcript)
+        finalText = partialText.isEmpty ? accumulatedFinalText : partialText
 
         state = .stopped
         Log.stt.info("Deepgram stopped, final: \(self.finalText.prefix(50))...")
@@ -168,54 +174,64 @@ final class DeepgramTranscriptionEngine: ObservableObject, TranscriptionEngine {
         // Clear state
         partialText = ""
         finalText = ""
+        accumulatedFinalText = ""
         state = .idle
     }
 
-    // MARK: - Private Methods
+    // MARK: - Private Methods (nonisolated for audio thread safety)
 
-    private func processAudioBuffer(_ buffer: AVAudioPCMBuffer, converter: AVAudioConverter, targetFormat: AVAudioFormat) {
-        // Calculate output buffer size
-        let inputFrames = buffer.frameLength
-        let sampleRateRatio = targetFormat.sampleRate / buffer.format.sampleRate
-        let outputFrameCapacity = AVAudioFrameCount(Double(inputFrames) * sampleRateRatio) + 1
+    /// Creates the audio tap block in a nonisolated context to prevent @MainActor inference.
+    /// This is critical because the audio tap callback runs on a real-time audio thread.
+    nonisolated static func makeTapBlock(
+        deepgram: DeepgramService,
+        converter: AVAudioConverter,
+        targetFormat: AVAudioFormat
+    ) -> (AVAudioPCMBuffer, AVAudioTime) -> Void {
+        { buffer, _ in
+            // Feed AudioLevelService for waveform visualization (safe for audio thread)
+            let rms = computeRMS(buffer)
+            AudioLevelService.ingestFromAudioThread(rms: rms)
 
-        // Create output buffer
-        guard let convertedBuffer = AVAudioPCMBuffer(
-            pcmFormat: targetFormat,
-            frameCapacity: outputFrameCapacity
-        ) else { return }
+            // Calculate output buffer size
+            let inputFrames = buffer.frameLength
+            let sampleRateRatio = targetFormat.sampleRate / buffer.format.sampleRate
+            let outputFrameCapacity = AVAudioFrameCount(Double(inputFrames) * sampleRateRatio) + 1
 
-        // Convert audio
-        var error: NSError?
-        var inputBufferConsumed = false
-        converter.convert(to: convertedBuffer, error: &error) { _, outStatus in
-            if inputBufferConsumed {
-                outStatus.pointee = .noDataNow
-                return nil
+            // Create output buffer
+            guard let convertedBuffer = AVAudioPCMBuffer(
+                pcmFormat: targetFormat,
+                frameCapacity: outputFrameCapacity
+            ) else { return }
+
+            // Convert audio
+            var error: NSError?
+            var inputBufferConsumed = false
+            converter.convert(to: convertedBuffer, error: &error) { _, outStatus in
+                if inputBufferConsumed {
+                    outStatus.pointee = .noDataNow
+                    return nil
+                }
+                inputBufferConsumed = true
+                outStatus.pointee = .haveData
+                return buffer
             }
-            inputBufferConsumed = true
-            outStatus.pointee = .haveData
-            return buffer
-        }
 
-        guard error == nil, convertedBuffer.frameLength > 0 else { return }
+            guard error == nil, convertedBuffer.frameLength > 0 else { return }
 
-        // Extract Int16 samples and send to Deepgram
-        if let channelData = convertedBuffer.int16ChannelData?[0] {
-            let frames = Int(convertedBuffer.frameLength)
-            let data = Data(bytes: channelData, count: frames * MemoryLayout<Int16>.size)
+            // Extract Int16 samples and send to Deepgram
+            if let channelData = convertedBuffer.int16ChannelData?[0] {
+                let frames = Int(convertedBuffer.frameLength)
+                let data = Data(bytes: channelData, count: frames * MemoryLayout<Int16>.size)
 
-            Task {
-                try? await deepgram.send(audioData: data)
+                // Send asynchronously to the actor
+                Task {
+                    try? await deepgram.send(audioData: data)
+                }
             }
         }
-
-        // Feed AudioLevelService for waveform visualization
-        let rms = computeRMS(buffer)
-        AudioLevelService.ingestFromAudioThread(rms: rms)
     }
 
-    private nonisolated func computeRMS(_ buffer: AVAudioPCMBuffer) -> Float {
+    nonisolated static func computeRMS(_ buffer: AVAudioPCMBuffer) -> Float {
         guard let data = buffer.floatChannelData?[0] else { return 0 }
         let count = Int(buffer.frameLength)
         guard count > 0 else { return 0 }
