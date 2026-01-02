@@ -115,6 +115,7 @@ final class OverlayPanelController {
         @Published var responseText: String = ""
         @Published var accessibilityTrusted: Bool = PermissionMonitor.shared.accessibilityGranted
         @Published var audioLevel: Double = 0.0
+        @Published var isLoading: Bool = false  // True after fn release, before review (batch engines)
         @Published var isHovering: Bool = false
         @Published var isOpen: Bool = false  // Now a stored property
         @Published var closedNotchSize: CGSize = getClosedNotchSize()
@@ -1273,7 +1274,8 @@ private struct ActiveSessionBodyContent: View {
             // Show audio level visualizer when listening
             if isListening {
                 HStack(spacing: 12) {
-                    PillVisualizer(level: model.audioLevel)
+                    CompactWaveformView(audioLevel: model.audioLevel, barCount: 12)
+                        .frame(width: 50, height: 16)
                     Text(hideLiveTranscription ? "Recording..." : "Speak now...")
                         .font(.subheadline)
                         .foregroundStyle(.white.opacity(0.6))
@@ -1594,9 +1596,9 @@ private struct ListeningSplitContent: View {
                 .scaleEffect(pulse ? 1.2 : 1.0)
                 .opacity(pulse ? 0.6 : 1.0)
 
-            // "Listening" text - only on 16" screens with enough space
+            // "Listening" or "Loading" text - only on 16" screens with enough space
             if showListeningText {
-                Text("Listening")
+                Text(model.isLoading ? "Loading" : "Listening")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.white.opacity(0.85))
                     .fixedSize()
@@ -1613,8 +1615,18 @@ private struct ListeningSplitContent: View {
     }
 
     private var rightWing: some View {
-        CompactWaveformView(audioLevel: model.audioLevel, barCount: 16)
-            .padding(.leading, 6)  // Gap from notch edge
+        Group {
+            if model.isLoading {
+                // Show loader during batch transcription processing
+                ProgressView()
+                    .scaleEffect(0.6)
+                    .tint(.white)
+            } else if model.audioLevel > 0.01 {
+                // Show waveform only when actively recording
+                CompactWaveformView(audioLevel: model.audioLevel, barCount: 16)
+            }
+        }
+        .padding(.leading, 6)  // Gap from notch edge
     }
 
     private func formatTime(_ interval: TimeInterval) -> String {

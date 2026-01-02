@@ -204,11 +204,12 @@ final class SessionController: ObservableObject {
         levelTask?.cancel()
         levelTask = nil
 
-        // For batch engines (WhisperKit), show transcribing state before processing
+        // For batch engines (WhisperKit), show loading state in wing layout
         let isBatchEngine = !transcription.engineType.isStreaming
         if isBatchEngine {
-            overlay.presentTranscribing()
-            Log.stt.info("Batch engine - showing transcribing overlay")
+            overlay.model.isLoading = true
+            overlay.model.audioLevel = 0.0  // Hide waveform, show spinner
+            Log.stt.info("Batch engine - showing loading state in wings")
         }
 
         Task { @MainActor in
@@ -299,6 +300,7 @@ final class SessionController: ObservableObject {
             }
 
             // Show review overlay after paste attempt (non-activating).
+            self.overlay.model.isLoading = false  // Reset loading state before review
             self.overlay.presentReview(
                 appName: self.appContext?.appName ?? "Unknown",
                 screenshot: self.screenshot,
@@ -329,6 +331,7 @@ final class SessionController: ObservableObject {
             didPauseMusicForDictation = false
         }
 
+        overlay.model.isLoading = false  // Reset loading state
         phase = .idle
         overlay.presentIdleChip()
         Log.app.info("session cancel()")
@@ -662,6 +665,7 @@ private extension SessionController {
         screenshot = nil
         transcriptDraft = ""
         appContext = nil
+        overlay.model.isLoading = false  // Reset loading state
         phase = .idle
         overlay.presentIdleChip()
     }
