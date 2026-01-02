@@ -98,8 +98,11 @@ final class OverlayPanelController {
                     // For batch engines (WhisperKit) or when hiding transcription, stay in peek mode
                     // Otherwise streaming engines expand to show live transcript
                     isOpen = isStreamingEngine && !hideLiveTranscription
-                } else if mode == .transcribing || mode == .review || mode == .processing || mode == .response || mode == .error {
+                } else if mode == .review || mode == .processing || mode == .response || mode == .error {
                     isOpen = true
+                } else if mode == .transcribing {
+                    // Minimal Wispr-style: stay closed during transcribing (header only with spinner)
+                    isOpen = false
                 }
                 if mode == .idleChip || mode == .hidden {
                     isOpen = false
@@ -141,7 +144,24 @@ final class OverlayPanelController {
             return screen.safeAreaInsets.top > 0
         }
 
-        /// Dynamic width for closed notch - expands for Now Playing wings (boring.notch pattern)
+        /// Wing size for listening mode - based on available space beside notch
+        /// Returns the actual available wing space (auxiliaryTopLeftArea), capped at 100pt max
+        var listeningWingSize: CGFloat {
+            guard let screen = NSScreen.main,
+                  let auxLeft = screen.auxiliaryTopLeftArea else {
+                return 80  // Fallback for non-notch screens
+            }
+            // Use available space, but cap at 100pt to avoid overly wide wings
+            return min(auxLeft.width, 100)
+        }
+
+        /// Whether there's enough wing space to show "Listening" text
+        /// 14" MBP has ~79pt, 16" has ~91pt - need ~85pt for full text
+        var showListeningText: Bool {
+            listeningWingSize >= 85
+        }
+
+        /// Dynamic width for closed notch - expands for Now Playing or Listening wings (boring.notch pattern)
         var effectiveClosedWidth: CGFloat {
             let baseWidth = closedNotchSize.width
             // Expand for Now Playing album art wing when music is active
@@ -150,6 +170,11 @@ final class OverlayPanelController {
                 // Symmetric expansion for centered frame: 40 on each side = 80 total
                 let wingSize: CGFloat = 40
                 return baseWidth + (wingSize * 2)
+            }
+            // Listening mode: symmetric 60pt wings (content-hugging)
+            // Total: 212 + 120 = 332pt (similar to NowPlaying's 292pt)
+            if mode == .listening && !isOpen {
+                return baseWidth + (listeningWingSize * 2)
             }
             return baseWidth
         }
@@ -661,7 +686,13 @@ private struct OverlayRootView: View {
                 try? await Task.sleep(for: .milliseconds(300))
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
-                    guard model.mode != .hidden else { return }
+                    // Only expand during listening if streaming with visible transcript
+                    // Batch engines (WhisperKit) and hidden transcript stay in peek mode
+                    let allowListeningExpand = model.mode == .listening &&
+                        model.isStreamingEngine &&
+                        !UserDefaults.standard.bool(forKey: "hideLiveTranscription")
+
+                    guard model.mode != .hidden && (model.mode != .listening || allowListeningExpand) else { return }
                     withAnimation(openAnimation) {
                         model.isOpen = true
                     }
@@ -817,8 +848,19 @@ private struct OverlayRootView: View {
         case .listening:
             // Always show split content on notch Macs - no expansion on hover during recording
             // This prevents the confusing "expanded listening" state
-            if model.hasPhysicalNotch {
-                ListeningSplitContent(model: model)
+            if model.hasPhysicalNotch && !model.isOpen {
+                ListeningSplitContent(model: model, notchWidth: model.closedNotchSize.width, wingSize: model.listeningWingSize, showListeningText: model.showListeningText)
+                    .frame(width: model.effectiveClosedWidth, height: model.closedNotchSize.height)
+            } else if model.hasPhysicalNotch && model.isOpen {
+                // Streaming engine with visible transcript - show standard header when expanded
+                NotchHeader(
+                    model: model,
+                    statusColor: .cyan,
+                    statusText: "Listening...",
+                    showPulse: true,
+                    showCloseButton: false,
+                    rightContent: { EmptyView() }
+                )
             } else {
                 // Non-notch Macs: simple header
                 NotchHeader(
@@ -847,7 +889,7 @@ private struct OverlayRootView: View {
             NotchHeader(
                 model: model,
                 statusColor: .green,
-                statusText: "Done. Press fn to talk again",
+                statusText: model.hasPhysicalNotch ? "Done" : "Done. Press fn to talk again",
                 showPulse: false,
                 showCloseButton: true,
                 rightContent: { EmptyView() }
@@ -897,7 +939,7 @@ private struct OverlayRootView: View {
         case .listening, .review:
             ActiveSessionBodyContent(model: model)
         case .transcribing:
-            TranscribingBodyContent(model: model)
+            EmptyView()  // Minimal Wispr-style: header only with spinner, no body expansion
         case .processing:
             ProcessingBodyContent()
         case .response:
@@ -1507,40 +1549,30 @@ private struct ChatResponseView: View {
 
 private struct ListeningSplitContent: View {
     @ObservedObject var model: OverlayPanelController.Model
+    let notchWidth: CGFloat
+    let wingSize: CGFloat  // Dynamic based on auxiliaryTopLeftArea
+    let showListeningText: Bool  // Hide on 14" screens with less space
+
     @State private var pulse = false
     @State private var elapsedTime: TimeInterval = 0
     let timer = Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()
 
     var body: some View {
+        // HStack with centered notch gap - content flows naturally without clipping
         HStack(spacing: 0) {
-            // LEFT: Pulsing dot + "Listening" + timer (content-hugging)
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(Color.cyan.opacity(0.95))
-                    .frame(width: 8, height: 8)
-                    .scaleEffect(pulse ? 1.3 : 1.0)
-                    .opacity(pulse ? 0.6 : 1.0)
-                Text("Listening")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.8))
-                Text(formatTime(elapsedTime))
-                    .font(.system(size: 11, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.6))
-            }
-            .padding(.leading, 6)  // Prevent left dot from being cut off
-            .padding(.trailing, 4)
+            // LEFT wing content - right-aligned (hugs notch)
+            leftWing
+                .frame(maxWidth: .infinity, alignment: .trailing)
 
-            // CENTER: The notch gap - exact notch width
-            Rectangle()
-                .fill(.black)
-                .frame(width: model.closedNotchSize.width)
+            // Notch spacer (invisible, just takes up notch width)
+            Color.clear
+                .frame(width: notchWidth)
 
-            // RIGHT: Waveform visualizer (content-hugging)
-            CompactWaveformView(audioLevel: model.audioLevel)
-                .padding(.leading, 4)
-                .padding(.trailing, 6)  // Balance with left padding
+            // RIGHT wing content - left-aligned (hugs notch)
+            rightWing
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(height: model.closedNotchSize.height)
+        .frame(width: notchWidth + (wingSize * 2))  // Total container width
         .onAppear {
             withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
                 pulse = true
@@ -1551,6 +1583,38 @@ private struct ListeningSplitContent: View {
                 elapsedTime = Date().timeIntervalSince(start)
             }
         }
+    }
+
+    private var leftWing: some View {
+        HStack(spacing: 4) {
+            // Pulsing recording dot
+            Circle()
+                .fill(Color.cyan.opacity(0.95))
+                .frame(width: 8, height: 8)
+                .scaleEffect(pulse ? 1.2 : 1.0)
+                .opacity(pulse ? 0.6 : 1.0)
+
+            // "Listening" text - only on 16" screens with enough space
+            if showListeningText {
+                Text("Listening")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .fixedSize()
+            }
+
+            // Timer - same size as Listening for consistency
+            Text(formatTime(elapsedTime))
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.white)
+                .fixedSize()
+        }
+        .padding(.leading, 6)
+        .padding(.trailing, 6)
+    }
+
+    private var rightWing: some View {
+        CompactWaveformView(audioLevel: model.audioLevel, barCount: 16)
+            .padding(.leading, 6)  // Gap from notch edge
     }
 
     private func formatTime(_ interval: TimeInterval) -> String {
